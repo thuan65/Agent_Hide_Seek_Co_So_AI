@@ -9,3 +9,5 @@ python arena.py --seek 24127552  --hide example_student
 example_student là folder vào cái con agent mẫu
 
 chúng ta chỉ việc ứng dụng thuật toán tìm kiếm và code trong các hàm class có sẵn,... nhớ đọc các important vì :v thầy không cho đổi tên hàm.
+
+Continue (tôi sẽ add thêm sau)
