@@ -31,7 +31,8 @@ from agent_interface import PacmanAgent as BasePacmanAgent
 from agent_interface import GhostAgent as BaseGhostAgent
 from environment import Move
 import numpy as np
-from collections import deque as Queue
+from collections import deque as Queue # For BFS queue
+import heapq # For A* priority queue
 
 class PacmanAgent(BasePacmanAgent):
     """
@@ -46,7 +47,7 @@ class PacmanAgent(BasePacmanAgent):
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
         # TODO: Initialize any data structures you need
         # Examples:
-        # - self.path = []  # Store planned path
+        self.path = []  # Store planned path
         # - self.visited = set()  # Track visited positions
         self.name = "Template Pacman"
         # Memory for limited observation mode
@@ -68,11 +69,6 @@ class PacmanAgent(BasePacmanAgent):
         Returns:
             Move or (Move, steps): Direction to move (optionally with step count)
         """
-        # TODO: Implement your search algorithm here
-
-        # Update memory if enemy is visible
-        if enemy_position is not None:
-            self.last_known_enemy_pos = enemy_position
         
         # Use current sighting, fallback to last known, or explore
         target = enemy_position or self.last_known_enemy_pos
@@ -84,37 +80,23 @@ class PacmanAgent(BasePacmanAgent):
                     return (move, 1)
             return (Move.STAY, 1)
 
-        path = self.BFS(my_position, target, map_state)
-    
-        # if path and len(path) > 1:
-        # # Example: Simple greedy approach (replace with your algorithm)
-        # row_diff = target[0] - my_position[0]
-        # col_diff = target[1] - my_position[1]
-        
-        # Try to move towards ghost
-        # if abs(row_diff) > abs(col_diff):
-        #     primary_move = Move.DOWN if row_diff > 0 else Move.UP
-        #     desired_steps = abs(row_diff)
-        # else:
-        #     primary_move = Move.RIGHT if col_diff > 0 else Move.LEFT
-        #     desired_steps = abs(col_diff)
+        # Ghost is visible or last known
+        ghost_moved_far = False
 
-        # action = self._choose_action(
-        #     my_position,
-        #     [primary_move],
-        #     map_state,
-        #     desired_steps
-        # )
-        # if action:
-        #     return action
+        if enemy_position is not None and self.last_known_enemy_pos is not None:
+            if self.mahattan_distance(enemy_position, self.last_known_enemy_pos) >= 1:
+                ghost_moved_far = True
 
-        # If the primary direction is blocked, try other moves
-        # fallback_moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
-        # action = self._choose_action(my_position, fallback_moves, map_state, self.pacman_speed)
-        # if action:
-        #     return action
-        
-        action = self._choose_action_and_step_number(path)
+        if len(self.path) == 0 or ghost_moved_far:
+            #self.path = self.BFS(my_position, target, map_state)
+            self.path = self.A_star(my_position, target, map_state)
+            self.last_known_enemy_pos = target
+
+        if self.last_known_enemy_pos is not None:
+            distance = abs(my_position[0] )
+
+        action = self._choose_action_and_step_number(self.path)
+
         if action:
             return action
 
@@ -143,10 +125,46 @@ class PacmanAgent(BasePacmanAgent):
                         BFS_queue.append(neighbor)
         return None  # No path found
 
+    def A_star(self, start: tuple, goal: tuple, map_state: np.ndarray):
+        if start == goal:
+            return [start]
+        
+        open_set = []
+        heapq.heappush(open_set, (0 + self.mahattan_distance(start, goal), 0, start))
+        g_score = {start: 0}
+        parent = {}
+
+        while open_set:
+            current_f, current_g, current_pos = heapq.heappop(open_set)
+
+            if current_pos == goal:
+                path = []
+                curr = goal
+                while curr != start:
+                    path.append(curr)
+                    curr = parent[curr]
+                path.append(start)
+                path.reverse()
+                return path
+            
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                delta_row, delta_col = move.value
+                neighbor = (current_pos[0] + delta_row, current_pos[1] + delta_col)
+                if self._is_valid_position(neighbor, map_state):
+                    tentative_g_score = g_score[current_pos] + 1
+                    if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                        parent[neighbor] = current_pos
+                        g_score[neighbor] = tentative_g_score
+                        f_score = tentative_g_score + self.mahattan_distance(neighbor, goal)
+                        heapq.heappush(open_set, (f_score, tentative_g_score, neighbor))
+        return None  # No path found
 
     ###################################################################################
 
     # Helper methods (you can add more)
+
+    def mahattan_distance(self, pos1: tuple, pos2: tuple) -> int:
+        return abs(pos1[0] - pos2[0] + abs(pos1[1] - pos2[1]))
 
     def _choose_action_and_step_number(self, path):
         if len(path) < 2:
@@ -161,8 +179,13 @@ class PacmanAgent(BasePacmanAgent):
             mov2 = self._get_move_direction(pos1, pos2)
 
             if mov1 == mov2:
+                path.pop(0)
+                path.pop(0)
                 return (mov1, 2)
-        return (self._get_move_direction(path[0], path[1]), 1)
+        
+        mov = self._get_move_direction(path[0], path[1])
+        path.pop(0)
+        return (mov, 1)
 
 
     def _get_move_direction(self, from_pos: tuple, to_pos: tuple) -> Move:
