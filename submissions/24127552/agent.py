@@ -31,7 +31,7 @@ from agent_interface import PacmanAgent as BasePacmanAgent
 from agent_interface import GhostAgent as BaseGhostAgent
 from environment import Move
 import numpy as np
-
+from collection import deque
 
 class PacmanAgent(BasePacmanAgent):
     """
@@ -113,6 +113,31 @@ class PacmanAgent(BasePacmanAgent):
         
         return (Move.STAY, 1)
     
+    ######################### Search Algorithm Implementation #########################
+    def BFS(self, start: tuple, goal: tuple, map_state: np.ndarray):
+        queue = deque([start])
+        visited = {start: None} # Track visited nodes
+
+        while queue:
+            current = queue.popleft()
+            if current == goal:
+                path = []
+                while current is not None:
+                    path.append(current)
+                    current = visited[current]
+                return path[::-1]
+            else:
+                for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                    delta_row, delta_col = move.value
+                    neighbor = (current[0] + delta_row, current[1] + delta_col)
+                    if self.is_valid_position(neighbor, map_state) and neighbor not in visited:
+                        visited[neighbor] = current
+                        queue.append(neighbor)
+        return None  # No path found
+
+
+    ###################################################################################
+
     # Helper methods (you can add more)
     
     def _choose_action(self, pos: tuple, moves, map_state: np.ndarray, desired_steps: int):
