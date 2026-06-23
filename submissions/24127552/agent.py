@@ -31,7 +31,7 @@ from agent_interface import PacmanAgent as BasePacmanAgent
 from agent_interface import GhostAgent as BaseGhostAgent
 from environment import Move
 import numpy as np
-from collection import deque
+from collections import deque as Queue
 
 class PacmanAgent(BasePacmanAgent):
     """
@@ -69,7 +69,7 @@ class PacmanAgent(BasePacmanAgent):
             Move or (Move, steps): Direction to move (optionally with step count)
         """
         # TODO: Implement your search algorithm here
-        
+
         # Update memory if enemy is visible
         if enemy_position is not None:
             self.last_known_enemy_pos = enemy_position
@@ -83,43 +83,51 @@ class PacmanAgent(BasePacmanAgent):
                 if self._is_valid_move(my_position, move, map_state):
                     return (move, 1)
             return (Move.STAY, 1)
-        
-        # Example: Simple greedy approach (replace with your algorithm)
-        row_diff = target[0] - my_position[0]
-        col_diff = target[1] - my_position[1]
+
+        path = self.BFS(my_position, target, map_state)
+    
+        # if path and len(path) > 1:
+        # # Example: Simple greedy approach (replace with your algorithm)
+        # row_diff = target[0] - my_position[0]
+        # col_diff = target[1] - my_position[1]
         
         # Try to move towards ghost
-        if abs(row_diff) > abs(col_diff):
-            primary_move = Move.DOWN if row_diff > 0 else Move.UP
-            desired_steps = abs(row_diff)
-        else:
-            primary_move = Move.RIGHT if col_diff > 0 else Move.LEFT
-            desired_steps = abs(col_diff)
+        # if abs(row_diff) > abs(col_diff):
+        #     primary_move = Move.DOWN if row_diff > 0 else Move.UP
+        #     desired_steps = abs(row_diff)
+        # else:
+        #     primary_move = Move.RIGHT if col_diff > 0 else Move.LEFT
+        #     desired_steps = abs(col_diff)
 
-        action = self._choose_action(
-            my_position,
-            [primary_move],
-            map_state,
-            desired_steps
-        )
-        if action:
-            return action
+        # action = self._choose_action(
+        #     my_position,
+        #     [primary_move],
+        #     map_state,
+        #     desired_steps
+        # )
+        # if action:
+        #     return action
 
         # If the primary direction is blocked, try other moves
-        fallback_moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
-        action = self._choose_action(my_position, fallback_moves, map_state, self.pacman_speed)
+        # fallback_moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
+        # action = self._choose_action(my_position, fallback_moves, map_state, self.pacman_speed)
+        # if action:
+        #     return action
+        
+        action = self._choose_action_and_step_number(path)
         if action:
             return action
-        
+
         return (Move.STAY, 1)
     
     ######################### Search Algorithm Implementation #########################
     def BFS(self, start: tuple, goal: tuple, map_state: np.ndarray):
-        queue = deque([start])
+        BFS_queue = Queue([start])
         visited = {start: None} # Track visited nodes
+        
+        while BFS_queue:
 
-        while queue:
-            current = queue.popleft()
+            current = BFS_queue.popleft()
             if current == goal:
                 path = []
                 while current is not None:
@@ -130,15 +138,46 @@ class PacmanAgent(BasePacmanAgent):
                 for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
                     delta_row, delta_col = move.value
                     neighbor = (current[0] + delta_row, current[1] + delta_col)
-                    if self.is_valid_position(neighbor, map_state) and neighbor not in visited:
+                    if self._is_valid_position(neighbor, map_state) and neighbor not in visited:
                         visited[neighbor] = current
-                        queue.append(neighbor)
+                        BFS_queue.append(neighbor)
         return None  # No path found
 
 
     ###################################################################################
 
     # Helper methods (you can add more)
+
+    def _choose_action_and_step_number(self, path):
+        if len(path) < 2:
+            return (Move.STAY, 1)
+
+        if len(path) >= 3:
+            pos0 = path[0]
+            pos1 = path[1]
+            pos2 = path[2]
+
+            mov1 = self._get_move_direction(pos0, pos1)
+            mov2 = self._get_move_direction(pos1, pos2)
+
+            if mov1 == mov2:
+                return (mov1, 2)
+        return (self._get_move_direction(path[0], path[1]), 1)
+
+
+    def _get_move_direction(self, from_pos: tuple, to_pos: tuple) -> Move:
+        row_diff = to_pos[0] - from_pos[0]
+        col_diff = to_pos[1] - from_pos[1]
+
+        if row_diff == -1 and col_diff == 0:
+            return Move.UP
+        if row_diff == 1 and col_diff == 0:
+            return Move.DOWN
+        if row_diff == 0 and col_diff == -1:
+            return Move.LEFT
+        if row_diff == 0 and col_diff == 1:
+            return Move.RIGHT
+
     
     def _choose_action(self, pos: tuple, moves, map_state: np.ndarray, desired_steps: int):
         for move in moves:
