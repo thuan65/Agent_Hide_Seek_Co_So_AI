@@ -52,6 +52,11 @@ class PacmanAgent(BasePacmanAgent):
         self.name = "Template Pacman"
         # Memory for limited observation mode
         self.last_known_enemy_pos = None
+
+        # ======= Not used ======
+        # self.F_W_Cache = []
+        # self.Floyd_Warshall_cache_initialized = False
+        # # =======================
     
     def step(self, map_state: np.ndarray, 
              my_position: tuple, 
@@ -69,10 +74,10 @@ class PacmanAgent(BasePacmanAgent):
         Returns:
             Move or (Move, steps): Direction to move (optionally with step count)
         """
-        
+
         # Use current sighting, fallback to last known, or explore
         target = enemy_position or self.last_known_enemy_pos
-        
+
         if target is None:
             # No information about enemy - explore randomly
             for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
@@ -159,6 +164,41 @@ class PacmanAgent(BasePacmanAgent):
                         heapq.heappush(open_set, (f_score, tentative_g_score, neighbor))
         return None  # No path found
 
+#         ##################################################################
+
+    #         ##############################Floyd_Warshall#####################
+    # def Floyd_Warshall_init(self, map_state: np.ndarray):
+    #     INF = 9999999999
+        
+    #     R = len(map_state)
+    #     C = len(map_state[0])
+    #     N = R * C
+   
+
+    #     self.F_W_Cache = [[INF] * N for _ in range(N)]
+
+    #     for i in range(N):
+    #         self.F_W_Cache[i][i] = 0
+
+    #     for r in range (R):
+    #         for c in range(C):
+    #             if map_state[r][c] == 1:
+    #                 continue
+    #             current_pos = (r, c)
+    #             row_array = r * C + c
+
+    #             for move in [Move.UP, Move.DOWN, Move.RIGHT, Move.LEFT]:
+    #                 delta_row, delta_col = move.value
+    #                 neighbor = (current_pos[0] + delta_row, current_pos[1] + delta_col)
+    #                 if self._is_valid_position(neighbor, map_state):
+    #                     col_array = neighbor[0] * C + neighbor[1]
+    #                     self.F_W_Cache[row_array][col_array] = 1
+    #     for k in range(N):
+    #         for i in range(N):
+    #             for j in range(N):
+    #                 if self.F_W_Cache[i][k] + self.F_W_Cache[k][j] < self.F_W_Cache[i][j]:
+    #                     self.F_W_Cache[i][j] = self.F_W_Cache[i][k] + self.F_W_Cache[k][j]
+    #     self.Floyd_Warshall_cache_initialized = True
     ###################################################################################
 
     # Helper methods (you can add more)
