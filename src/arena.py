@@ -122,12 +122,11 @@ class Arena:
         
         try:
             print(f"Loading Pacman agent from student: {self.pacman_id}")
-            r = self.loader.load_agent(
+            self.pacman_agent = self.loader.load_agent(
                 self.pacman_id,
                 'pacman',
                 init_kwargs={'pacman_speed': self.pacman_speed}
             )
-            self.pacman_agent = AgentProfilerWrapper(r, agent_name=f"Pacman_{self.pacman_id}")
             print(f"✓ Pacman agent loaded successfully\n")
         except AgentLoadError as e:
             print(f"✗ Failed to load Pacman agent: {e}\n")
@@ -138,8 +137,7 @@ class Arena:
         
         try:
             print(f"Loading Ghost agent from student: {self.ghost_id}")
-            g = self.loader.load_agent(self.ghost_id, 'ghost')
-            self.ghost_agent = AgentProfilerWrapper(g, agent_name=f"Ghost_{self.ghost_id}")
+            self.ghost_agent = self.loader.load_agent(self.ghost_id, 'ghost')
             print(f"✓ Ghost agent loaded successfully\n")
         except AgentLoadError as e:
             print(f"✗ Failed to load Ghost agent: {e}\n")
@@ -433,100 +431,6 @@ Examples:
     
     return 0 if result in ['pacman_wins', 'ghost_wins', 'draw'] else 1
 
-import time
-import tracemalloc
-import csv
-from pathlib import Path
-
-import time
-import tracemalloc
-import csv
-from pathlib import Path
-
-class AgentProfilerWrapper:
-    """
-    Class bọc ngoài Agent để đo tổng số step, thời gian chạy lâu nhất (Max Time)
-    và RAM tiêu thụ lớn nhất (Peak RAM) của lần chạy này.
-    """
-    def __init__(self, agent_instance, run_index=1, agent_name="Agent", output_dir="benchmarks"):
-        self.agent = agent_instance
-        self.agent_name = agent_name
-        self.run_index = run_index  # Lần chạy thứ i
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.csv_path = self.output_dir / f"{self.agent_name}_summary.csv"
-        
-        # Khởi tạo các biến thống kê
-        self.total_steps = 0
-        self.max_execution_time = 0.0
-        self.max_ram_peak_bytes = 0
-        
-        # Kiểm tra nếu file chưa tồn tại thì ghi dòng tiêu đề (Header)
-        if not self.csv_path.exists():
-            with open(self.csv_path, mode='w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "Run_Index", 
-                    "Total_Steps", 
-                    "Max_Execution_Time_Sec", 
-                    "Absolute_Peak_RAM_MB"
-                ])
-                
-        tracemalloc.start()
-
-    def step(self, map_state, my_position, enemy_position, step_number):
-        # Tăng tổng số step đã chạy
-        self.total_steps += 1
-        
-        # Reset peak của tracemalloc để đo riêng cho step này
-        tracemalloc.reset_peak()
-        start_time = time.perf_counter()
-        
-        # Gọi hàm step gốc của sinh viên
-        move_decision = self.agent.step(map_state, my_position, enemy_position, step_number)
-        
-        end_time = time.perf_counter()
-        _, step_peak_mem = tracemalloc.get_traced_memory()
-        
-        execution_time = end_time - start_time
-        
-        # 1. Cập nhật thời gian chạy lâu nhất (Max Time)
-        if execution_time > self.max_execution_time:
-            self.max_execution_time = execution_time
-            
-        # 2. Cập nhật lượng RAM lớn nhất từng đạt được (Peak RAM)
-        if step_peak_mem > self.max_ram_peak_bytes:
-            self.max_ram_peak_bytes = step_peak_mem
-            
-        return move_decision
-
-    def log_profile_results(self):
-        """
-        Hàm chủ động ghi dữ liệu tổng hợp của lần chạy thứ i vào CSV.
-        """
-        # Đổi RAM từ Bytes sang MB
-        max_ram_peak_mb = self.max_ram_peak_bytes / (1024 * 1024)
-        
-        with open(self.csv_path, mode='a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                self.run_index,
-                self.total_steps,
-                f"{self.max_execution_time:.6f}",
-                f"{max_ram_peak_mb:.4f}"
-            ])
-
-    def __del__(self):
-        # Tự động lưu dữ liệu nếu user quên gọi hàm log_profile_results
-        try:
-            self.log_profile_results()
-        except:
-            pass
-        
-        try:
-            tracemalloc.stop()
-        except:
-            pass
 
 if __name__ == '__main__':
     sys.exit(main())
