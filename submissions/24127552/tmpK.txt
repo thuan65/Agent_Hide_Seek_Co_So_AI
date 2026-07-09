@@ -1,4 +1,314 @@
-"""
+import keyboard # For keyboard input (for debugging)
+
+def take_control():
+    print("Taking control of Pacman. Use arrow keys to move. Press 'q' to quit.")
+    while True:
+        if keyboard.is_pressed('up'):
+            return Move.UP
+        elif keyboard.is_pressed('down'):
+            return Move.DOWN
+        elif keyboard.is_pressed('left'):
+            return Move.LEFT
+        elif keyboard.is_pressed('right'):
+            return Move.RIGHT
+        elif keyboard.is_pressed('q'):
+            print("Exiting manual control.")
+        elif keyboard.is_pressed('x'):
+            return Move.STAY
+            sys.exit(0)
+
+        mov = take_control()
+        return mov
+
+
+
+
+class GhostAgent(BaseGhostAgent):
+    """
+    Ghost (Hider) Agent - Goal: Avoid being caught
+    Optimized: Minimax + Alpha-Beta Pruning + Territory-Control Evaluation
+    """
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 2)))
+        self.name = "Territory Minimax Ghost"
+        
+        # State Tracking & Navigation Cache
+        self.last_known_enemy_pos = None
+        self.valid_cells = set()
+        self.neighbor_cache = {}
+        self.dead_ends = set()
+        self.initialized = False
+
+    def _init_caches(self, map_state: np.ndarray):
+        """Precompute navigation graph, adjacency lists, and dead-ends."""
+        height, width = map_state.shape
+        self.valid_cells = {
+            (r, c) for r in range(height) for c in range(width) if map_state[r, c] == 0
+        }
+        
+        self.neighbor_cache = {}
+        for r, c in self.valid_cells:
+            neighbors = []
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                dr, dc = move.value
+                nr, nc = r + dr, c + dc
+                if (nr, nc) in self.valid_cells:
+                    neighbors.append(((nr, nc), move))
+            self.neighbor_cache[(r, c)] = neighbors
+
+        # Iteratively identify structural dead-ends (corridors with 1 escape route)
+        degrees = {cell: len(neighs) for cell, neighs in self.neighbor_cache.items()}
+        dead_ends = set()
+        queue = [cell for cell, deg in degrees.items() if deg <= 1]
+        while queue:
+            curr = queue.pop(0)
+            dead_ends.add(curr)
+            for neighbor, _ in self.neighbor_cache.get(curr, []):
+                if neighbor not in dead_ends:
+                    valid_neighs = [n for n, _ in self.neighbor_cache[neighbor] if n not in dead_ends]
+                    if len(valid_neighs) <= 1:
+                        queue.append(neighbor)
+        self.dead_ends = dead_ends
+        self.initialized = True
+
+    def _get_distance(self, start: tuple, goal: tuple) -> int:
+        """Fast BFS shortest-path distance."""
+        if start == goal:
+            return 0
+        queue = [(start, 0)]
+        visited = {start}
+        while queue:
+            curr, dist = queue.pop(0)
+            if curr == goal:
+                return dist
+            for neighbor, _ in self.neighbor_cache.get(curr, []):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, dist + 1))
+        return 999
+
+    def _analyze_territory(self, ghost_pos: tuple, pac_pos: tuple) -> tuple:
+        """Perform a custom flood-fill to get reachable territory and branching metric."""
+        queue = [ghost_pos]
+        visited = {ghost_pos}
+        total_branching = 0
+        
+        while queue:
+            curr = queue.pop(0)
+            neighbors = self.neighbor_cache.get(curr, [])
+            total_branching += len(neighbors)
+            for neighbor, _ in neighbors:
+                if neighbor != pac_pos and neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+                    
+        territory_size = len(visited)
+        branching_factor = total_branching / max(1, territory_size)
+        return territory_size, branching_factor
+
+    def _evaluate_state(self, ghost_pos: tuple, pac_pos: tuple) -> float:
+        """Robust multi-criteria territory escape evaluation."""
+        if ghost_pos == pac_pos:
+            return -10000.0
+
+        pac_dist = self._get_distance(ghost_pos, pac_pos)
+        territory_size, branching_factor = self._analyze_territory(ghost_pos, pac_pos)
+        
+        dead_end_penalty = 1.0 if ghost_pos in self.dead_ends else 0.0
+        trap_risk = 1.0 if pac_dist <= 3 else 0.0
+
+        # Weighted survival metric formula
+        score = (
+            territory_size * 6.0
+            + branching_factor * 10.0
+            + pac_dist * 4.0
+            - dead_end_penalty * 20.0
+            - trap_risk * 25.0
+        )
+        return score
+
+    def _alphabeta(self, ghost_pos: tuple, pac_pos: tuple, depth: int, alpha: float, beta: float, is_max: bool) -> float:
+        """Alpha-Beta Minimax search optimized for high survival evasion."""
+        if depth == 0 or ghost_pos == pac_pos:
+            return self._evaluate_state(ghost_pos, pac_pos)
+
+        if is_max:
+            # Ghost Turn - maximize escape paths and distance
+            max_val = -float('inf')
+            candidates = []
+            for neighbor, move in self.neighbor_cache.get(ghost_pos, []):
+                dist = abs(neighbor[0] - pac_pos[0]) + abs(neighbor[1] - pac_pos[1])
+                candidates.append((dist, neighbor, move))
+            # Sort candidates to check the most promising moves away from Pacman first
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            candidates.append((abs(ghost_pos[0] - pac_pos[0]) + abs(ghost_pos[1] - pac_pos[1]), ghost_pos, Move.STAY))
+
+            for _, next_pos, _ in candidates:
+                val = self._alphabeta(next_pos, pac_pos, depth - 1, alpha, beta, False)
+                max_val = max(max_val, val)
+                alpha = max(alpha, val)
+                if beta <= alpha:
+                    break
+            return max_val
+        else:
+            # Pacman Turn - minimize Ghost's survival options
+            min_val = float('inf')
+            pac_moves = []
+            # Calculate all potential target positions Pacman could move to using its speed
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                for steps in range(1, self.pacman_speed + 1):
+                    next_pos = pac_pos
+                    valid = True
+                    for _ in range(steps):
+                        dr, dc = move.value
+                        candidate = (next_pos[0] + dr, next_pos[1] + dc)
+                        if candidate in self.valid_cells:
+                            next_pos = candidate
+                        else:
+                            valid = False
+                            break
+                    if not valid and next_pos == pac_pos:
+                        continue
+                    dist = abs(next_pos[0] - ghost_pos[0]) + abs(next_pos[1] - ghost_pos[1])
+                    pac_moves.append((dist, next_pos))
+                    
+            # Sort: Pacman chooses paths minimizing the distance to Ghost
+            pac_moves.sort(key=lambda x: x[0])
+            for _, next_pos in pac_moves[:4]:  # Prune search space branching factor
+                val = self._alphabeta(ghost_pos, next_pos, depth - 1, alpha, beta, True)
+                min_val = min(min_val, val)
+                beta = min(beta, val)
+                if beta <= alpha:
+                    break
+            return min_val
+
+    def step(self, map_state: np.ndarray, 
+             my_position: tuple, 
+             enemy_position: tuple,
+             step_number: int) -> Move:
+        """Determine optimal survival action using Minimax with dynamic depth control."""
+        if not self.initialized:
+            self._init_caches(map_state)
+            
+        if enemy_position is not None:
+            self.last_known_enemy_pos = enemy_position
+            
+        threat = enemy_position or self.last_known_enemy_pos
+
+        # Fallback Behavior: patrol/maximize space if threat is unseen
+        if threat is None:
+            best_move = Move.STAY
+            best_score = -float('inf')
+            for neighbor, move in self.neighbor_cache.get(my_position, []):
+                score = len(self.neighbor_cache.get(neighbor, []))
+                if score > best_score:
+                    best_score = score
+                    best_move = move
+            return best_move
+
+        best_move = Move.STAY
+        best_score = -float('inf')
+
+        # Generate, rank and filter Ghost candidate moves
+        candidates = []
+        for neighbor, move in self.neighbor_cache.get(my_position, []):
+            dist = abs(neighbor[0] - threat[0]) + abs(neighbor[1] - threat[1])
+            candidates.append((dist, neighbor, move))
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        candidates.append((abs(my_position[0] - threat[0]) + abs(my_position[1] - threat[1]), my_position, Move.STAY))
+
+        # Shallow 4-depth lookahead evaluation (2 moves for Ghost, 2 moves for Pacman)
+        for _, next_pos, move in candidates:
+            score = self._alphabeta(next_pos, threat, depth=4, alpha=-float('inf'), beta=float('inf'), is_max=False)
+            if score > best_score:
+                best_score = score
+                best_move = move
+
+        return best_move
+
+
+
+            ##############################Floyd_Warshall#####################
+    # def Floyd_Warshall_init(self, map_state: np.ndarray):
+    #     INF = 9999999999
+        
+    #     R = len(map_state)
+    #     C = len(map_state[0])
+    #     N = R * C
+   
+
+    #     self.F_W_Cache = [[INF] * N for _ in range(N)]
+
+    #     for i in range(N):
+    #         self.F_W_Cache[i][i] = 0
+
+    #     for r in range (R):
+    #         for c in range(C):
+    #             if map_state[r][c] == 1:
+    #                 continue
+    #             current_pos = (r, c)
+    #             row_array = r * C + c
+
+    #             for move in [Move.UP, Move.DOWN, Move.RIGHT, Move.LEFT]:
+    #                 delta_row, delta_col = move.value
+    #                 neighbor = (current_pos[0] + delta_row, current_pos[1] + delta_col)
+    #                 if self._is_valid_position(neighbor, map_state):
+    #                     col_array = neighbor[0] * C + neighbor[1]
+    #                     self.F_W_Cache[row_array][col_array] = 1
+    #     for k in range(N):
+    #         for i in range(N):
+    #             for j in range(N):
+    #                 if self.F_W_Cache[i][k] + self.F_W_Cache[k][j] < self.F_W_Cache[i][j]:
+    #                     self.F_W_Cache[i][j] = self.F_W_Cache[i][k] + self.F_W_Cache[k][j]
+    #     self.Floyd_Warshall_cache_initialized = True
+    ###################################################################################
+
+        ############################### Prediction Seeker Move  ###################################
+    # def _get_intercept_target(self, enemy_position: tuple) -> tuple:
+    #     """Motion extrapolation with clamping."""
+        
+    #     if self.enemy_velocity == (0, 0):
+    #         return self.prev_enemy_pos
+
+    #     # Choose prediction horizon based on Manhattan distance
+    #     dist = self.manhattan_distance(self.prev_enemy_pos, enemy_position)
+    #     horizon = 3 if dist > 4 else 1
+
+    #     vr, vc = self.enemy_velocity
+    #     pred_r = self.last_known_enemy_pos[0] + vr * horizon
+    #     pred_c = self.last_known_enemy_pos[1] + vc * horizon
+    #     pred_pos = (pred_r, pred_c)
+
+    #     if pred_pos in self.valid_cells:
+    #         return pred_pos
+    #     return self.prev_enemy_pos
+
+    import keyboard # For keyboard input (for debugging)
+
+def take_control():
+    print("Taking control of Pacman. Use arrow keys to move. Press 'q' to quit.")
+    while True:
+        if keyboard.is_pressed('up'):
+            return Move.UP
+        elif keyboard.is_pressed('down'):
+            return Move.DOWN
+        elif keyboard.is_pressed('left'):
+            return Move.LEFT
+        elif keyboard.is_pressed('right'):
+            return Move.RIGHT
+        elif keyboard.is_pressed('q'):
+            print("Exiting manual control.")
+        elif keyboard.is_pressed('x'):
+            return Move.STAY
+            sys.exit(0)
+
+        mov = take_control()
+        return mov
+
+
+        """
 Template for student agent implementation.
 
 INSTRUCTIONS:
@@ -34,12 +344,15 @@ import numpy as np
 from collections import deque as Queue # For BFS queue
 import heapq # For A* priority queue
 
-
 class PacmanAgent(BasePacmanAgent):
+    """
+    Suggested algorithms: BFS, DFS, A*, Greedy Best-First
+    "fog setting will NOT be used in this lab"
+    """
     
     def __init__(self, **kwargs):
-        self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
         super().__init__(**kwargs)
+        self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
 
         # - self.visited = set()  # Track visited positions
         self.name = "TVS Pacman"
@@ -91,7 +404,7 @@ class PacmanAgent(BasePacmanAgent):
                 for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
                     delta_row, delta_col = move.value
                     neighbor = (current[0] + delta_row, current[1] + delta_col)
-                    if self._is_valid_position_fast(neighbor, map_state) and neighbor not in visited:
+                    if self._is_valid_position(neighbor, map_state) and neighbor not in visited:
                         visited[neighbor] = current
                         BFS_queue.append(neighbor)
         return None  # No path found
@@ -144,27 +457,7 @@ class PacmanAgent(BasePacmanAgent):
         self.astar_cache[cache_key] = None  # No path found
         return None
 
-            ######################################################################
             
-        ############################### Prediction Seeker Move  ###################################
-    def _get_intercept_target(self, enemy_position: tuple) -> tuple:
-        """Motion extrapolation with clamping."""
-        
-        if self.enemy_velocity == (0, 0):
-            return self.prev_enemy_pos
-
-        # Choose prediction horizon based on Manhattan distance
-        dist = self.manhattan_distance(self.prev_enemy_pos, enemy_position)
-        horizon = 3 if dist > 4 else 1
-
-        vr, vc = self.enemy_velocity
-        pred_r = self.last_known_enemy_pos[0] + vr * horizon
-        pred_c = self.last_known_enemy_pos[1] + vc * horizon
-        pred_pos = (pred_r, pred_c)
-
-        if pred_pos in self.valid_cells:
-            return pred_pos
-        return self.prev_enemy_pos
     
     
     def _alphabeta(self, pac_pos: tuple, ghost_pos: tuple, depth: int, alpha: float, beta: float, is_max: bool) -> float:
@@ -177,23 +470,22 @@ class PacmanAgent(BasePacmanAgent):
             max_val = -float('inf')
             # Generate primary promising actions (1-step and speed-scaled moves)
             
-            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            moves = [Move.UP.value, Move.DOWN.value, Move.LEFT.value, Move.RIGHT.value]
+            for dr, dc in moves:
                 for steps in range(1, self.pacman_speed + 1):
                     next_pos = pac_pos
                     valid = True
-                    
                     for _ in range(steps):
-                        dr, dc = move.value
                         candidate = (next_pos[0] + dr, next_pos[1] + dc)
                         if candidate in self.valid_cells:
                             next_pos = candidate
                         else:
                             valid = False
                             break
-                        
-                    if not valid:
-                        continue
                     
+                    if not valid and next_pos == pac_pos:
+                        continue
+
                     val = self._alphabeta(next_pos, ghost_pos, depth - 1, alpha, beta, False)
                     max_val = max(max_val, val)
                     alpha = max(alpha, val)
@@ -218,31 +510,32 @@ class PacmanAgent(BasePacmanAgent):
     def _evaluate_state(self, pac_pos: tuple, ghost_pos: tuple) -> float:
         """Evaluation function reflecting distance, capture status, and topological traps."""
         if pac_pos == ghost_pos:
-            return 100000.0
+            return 10000.0
 
         path = None
         path = self.A_star(pac_pos, ghost_pos)
-        _dist = (len(path) - 1) if path else self.manhattan_distance(pac_pos, ghost_pos)
+        _dist = len(path) if path else self.manhattan_distance(pac_pos, ghost_pos)
+
+        
+
+        # manhattan_dist = self.manhattan_distance(pac_pos, ghost_pos)
 
         # Calculate ghost mobility and trap structural score
         ghost_moves = self.neighbor_cache.get(ghost_pos, [])
         ghost_mobility = len(ghost_moves)
 
         # Close distance (the closer the better)
-        distance_penalty = _dist * 50.0
-        
-        close_bonus = 0.0
-        if _dist <= 2:
-            close_bonus = (3 - _dist) * 2000.0
-        elif _dist <= 4:
-            close_bonus = (5 - _dist) * 200.0
-        
+        distance_penalty = _dist * 15.0
 
         trap_score = (4 - ghost_mobility) * 25.0
 
+        score = - distance_penalty + trap_score
 
-        score = - distance_penalty + trap_score * 0.9 + close_bonus
- 
+        if _dist <= 3:
+            score -= trap_score * 0.9
+            score += (4 - _dist) * 150.0
+
+
         return score
     
     ###################################################################################
@@ -324,6 +617,26 @@ class PacmanAgent(BasePacmanAgent):
     def _is_valid_position_fast(self, pos: tuple) -> bool:
         return pos in self.valid_cells
     
+    def _check_clear_straight_line(self, start: tuple, end: tuple) -> tuple:
+        r1, c1 = start
+        r2, c2 = end
+
+        if r1 == r2:
+            step_dir = 1 if c2 > c1 else -1
+            for c in range(c1 + step_dir, c2, step_dir):
+                if (r1, c) not in self.valid_cells:
+                    return False, None
+            return True, (Move.RIGHT if step_dir == 1 else Move.LEFT)
+        
+        if c1 == c2:
+            step_dir = 1 if r2 > r1 else -1
+            for r in range(r1 + step_dir, r2, step_dir):
+                if (r, c1) not in self.valid_cells:
+                    return False, None
+            return True, (Move.DOWN if step_dir == 1 else Move.UP)
+        
+        return False, None
+    
     ############################### H_M  ###################################
 
     def step(self, map_state: np.ndarray, 
@@ -343,12 +656,11 @@ class PacmanAgent(BasePacmanAgent):
         best_action = (Move.STAY, 1)
         best_score = -float('inf')
 
-       
         for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
             for steps in range(1, self.pacman_speed + 1):
                 next_pos = my_position
                 valid = True
-                
+
                 for _ in range(steps):
                     dr, dc = move.value
                     candidate = (next_pos[0] + dr, next_pos[1] + dc)
@@ -357,18 +669,17 @@ class PacmanAgent(BasePacmanAgent):
                     else:
                         valid = False
                         break
-                        
+                
                 if not valid:
                     continue
-
                 if next_pos == target:
                     return (move, steps)
-                
-                score = self._alphabeta(next_pos, target, depth=3, alpha=-float('inf'), beta=float('inf'), is_max=False)
 
+                score = self._alphabeta(next_pos, target, depth=3, alpha=-float('inf'), beta=float('inf'), is_max=False)
                 if score > best_score or (score == best_score and steps > best_action[1] and best_action[0] == move):
                     best_score = score
                     best_action = (move, steps)
+
         return best_action
         
 
