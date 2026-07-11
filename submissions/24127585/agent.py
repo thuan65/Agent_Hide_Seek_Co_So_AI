@@ -1,10 +1,3 @@
-"""
-Hide and Seek arena agents for submission 24127585.
-
-Pacman uses shortest-path pursuit with limited straight-line speed.
-Ghost uses distance-based escape with dead-end awareness and fallback wandering.
-"""
-
 import sys
 from collections import deque
 from pathlib import Path
@@ -12,7 +5,6 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-# Add src to path to import the interface
 src_path = Path(__file__).parent.parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
