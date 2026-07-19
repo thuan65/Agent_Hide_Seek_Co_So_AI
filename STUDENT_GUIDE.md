@@ -321,7 +321,7 @@ def _manhattan_distance(self, pos1, pos2):
 cd src
 
 # Test your Pacman against example Ghost
-python arena.py --seek <your_id> --hide example_student
+python arena.py --seek bfs --hide example_student
 
 # Test your Ghost against example Pacman
 python arena.py --seek example_student --hide <your_id>
