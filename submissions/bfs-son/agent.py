@@ -260,108 +260,514 @@ class PacmanAgent(BasePacmanAgent):
 
 class GhostAgent(BaseGhostAgent):
     """
-    Example Ghost agent using a simple evasive strategy.
-    Students should implement their own search algorithms here.
+    Ghost agent using multi-goal BFS evaluation.
+
+    Strategy
+    --------
+    - Build maze graph once.
+    - Detect Pacman speed once.
+    - Evaluate every legal move.
+    - Choose the move that maximizes the number of Pacman turns
+      required to reach the Ghost.
+    - Break ties by maximizing immediate Manhattan distance.
     """
-    
+
     def __init__(self, **kwargs):
-        """
-        Initialize the Ghost agent.
-        Students can set up any data structures they need here.
-        """
-        super().__init__(**kwargs)
-        self.name = "Example Evasive Ghost"
-        # Memory for limited observation mode
+        super().__init__()
+
+        self.name = "Multi-Goal BFS Ghost"
+
+        self.graph = {}
+        self.graph_ready = False
+
         self.last_known_enemy_pos = None
-    
-    def step(self, map_state: np.ndarray, 
-             my_position: tuple, 
-             enemy_position: tuple,
-             step_number: int) -> Move:
-        """
-        Simple evasive strategy: move away from Pacman.
-        
-        When enemy_position is None (limited observation mode),
-        uses last known position or moves randomly.
-        
-        Students should implement better search algorithms like:
-        - BFS to find furthest point
-        - A* to plan escape route
-        - Minimax for adversarial search
-        - etc.
-        """
-        # Update memory if enemy is visible
+
+        self.pacman_speed = None
+
+    # ----------------------------------------------------------
+
+    def step(
+        self,
+        map_state,
+        my_position,
+        enemy_position,
+        step_number,
+    ):
+
+        if not self.graph_ready:
+            self._build_graph(map_state)
+            self.graph_ready = True
+
+        if self.pacman_speed is None:
+            self.pacman_speed = self._detect_pacman_speed()
+
         if enemy_position is not None:
             self.last_known_enemy_pos = enemy_position
-        
-        # Use current sighting, fallback to last known, or move randomly
-        threat = enemy_position or self.last_known_enemy_pos
-        
-        if threat is None:
-            # No information about enemy - move randomly
-            return self._random_move(my_position, map_state)
-        
-        # Calculate direction away from threat
-        row_diff = my_position[0] - threat[0]
-        col_diff = my_position[1] - threat[1]
-        
-        # List of possible moves in order of preference
-        moves = []
-        
-        # Prioritize vertical movement away from Pacman
-        if row_diff > 0:
-            moves.append(Move.DOWN)
-        elif row_diff < 0:
-            moves.append(Move.UP)
-        
-        # Prioritize horizontal movement away from Pacman
-        if col_diff > 0:
-            moves.append(Move.RIGHT)
-        elif col_diff < 0:
-            moves.append(Move.LEFT)
-        
-        # Try each move in order
+
+        pacman = enemy_position or self.last_known_enemy_pos
+
+        if pacman is None:
+            return self._random_move(my_position)
+
+        candidates = []
+
+        for move in (
+            Move.UP,
+            Move.DOWN,
+            Move.LEFT,
+            Move.RIGHT,
+        ):
+            nxt = self._apply_move(my_position, move)
+
+            if nxt in self.graph:
+                candidates.append((move, nxt))
+
+        # No legal move
+        if not candidates:
+            return Move.STAY
+
+        best_move = Move.STAY
+        best_score = (-1, -1)
+
+        for move, target in candidates:
+
+            turns = self._pacman_turn_distance(
+                pacman,
+                target,
+            )
+
+            manhattan = (
+                abs(target[0] - pacman[0]) +
+                abs(target[1] - pacman[1])
+            )
+
+            score = (
+                turns,
+                manhattan,
+            )
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+
+        return best_move
+
+    # ----------------------------------------------------------
+    # Graph
+    # ----------------------------------------------------------
+
+    def _build_graph(self, map_state):
+
+        rows, cols = map_state.shape
+
+        directions = [
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+        ]
+
+        for r in range(rows):
+            for c in range(cols):
+
+                if map_state[r, c] != 0:
+                    continue
+
+                node = (r, c)
+
+                self.graph[node] = []
+
+                for dr, dc in directions:
+
+                    nr = r + dr
+                    nc = c + dc
+
+                    if (
+                        0 <= nr < rows
+                        and 0 <= nc < cols
+                        and map_state[nr, nc] == 0
+                    ):
+                        self.graph[node].append((nr, nc))
+
+    # ----------------------------------------------------------
+    # BFS measured in Pacman turns
+    # ----------------------------------------------------------
+
+    def _pacman_turn_distance(
+        self,
+        start,
+        goal,
+    ):
+
+        if start == goal:
+            return 0
+
+        queue = deque([(start, 0)])
+        visited = {start}
+
+        while queue:
+
+            node, turns = queue.popleft()
+
+            for move in (
+                Move.UP,
+                Move.DOWN,
+                Move.LEFT,
+                Move.RIGHT,
+            ):
+
+                current = node
+
+                for _ in range(self.pacman_speed):
+
+                    nxt = self._apply_move(current, move)
+
+                    if nxt not in self.graph:
+                        break
+
+                    current = nxt
+
+                if current == node:
+                    continue
+
+                if current == goal:
+                    return turns + 1
+
+                if current not in visited:
+                    visited.add(current)
+                    queue.append(
+                        (
+                            current,
+                            turns + 1,
+                        )
+                    )
+
+        return float("inf")
+
+    # ----------------------------------------------------------
+
+    def _random_move(self, start):
+
+        moves = [
+            Move.UP,
+            Move.DOWN,
+            Move.LEFT,
+            Move.RIGHT,
+        ]
+
+        random.shuffle(moves)
+
         for move in moves:
-            delta_row, delta_col = move.value
-            new_pos = (my_position[0] + delta_row, my_position[1] + delta_col)
-            
-            # Check if move is valid
-            if self._is_valid_position(new_pos, map_state):
+
+            nxt = self._apply_move(start, move)
+
+            if nxt in self.graph:
                 return move
-        
-        # If no preferred move is valid, try any valid move
-        all_moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
-        random.shuffle(all_moves)
-        
-        for move in all_moves:
-            delta_row, delta_col = move.value
-            new_pos = (my_position[0] + delta_row, my_position[1] + delta_col)
-            
-            if self._is_valid_position(new_pos, map_state):
-                return move
-        
-        # If no move is valid, stay
+
         return Move.STAY
 
-    def _random_move(self, my_position: tuple, map_state: np.ndarray) -> Move:
-        """Random movement when enemy position is unknown."""
-        all_moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
-        random.shuffle(all_moves)
-        
-        for move in all_moves:
-            delta_row, delta_col = move.value
-            new_pos = (my_position[0] + delta_row, my_position[1] + delta_col)
-            if self._is_valid_position(new_pos, map_state):
-                return move
-        
-        return Move.STAY
-    
-    def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
-        """Check if a position is valid (not a wall and within bounds)."""
-        row, col = pos
-        height, width = map_state.shape
-        
-        if row < 0 or row >= height or col < 0 or col >= width:
-            return False
-        
-        return map_state[row, col] == 0
+    # ----------------------------------------------------------
+
+    def _detect_pacman_speed(self):
+
+        import inspect
+
+        try:
+
+            for frame_info in inspect.stack():
+
+                arena = frame_info.frame.f_locals.get("self")
+
+                if (
+                    arena is not None
+                    and arena.__class__.__name__ == "Arena"
+                ):
+
+                    return max(
+                        1,
+                        int(
+                            getattr(
+                                arena,
+                                "pacman_speed",
+                                2,
+                            )
+                        ),
+                    )
+
+        except Exception:
+            pass
+
+        return 2
+
+    # ----------------------------------------------------------
+
+    def _apply_move(
+        self,
+        pos,
+        move,
+    ):
+
+        dr, dc = move.value
+
+        return (
+            pos[0] + dr,
+            pos[1] + dc,
+        )
+
+# class GhostAgent(BaseGhostAgent):
+#     """
+#     Multi-goal BFS Ghost agent.
+
+#     Strategy
+#     --------
+#     - Preprocess maze into a graph once.
+#     - Detect Pacman's speed once.
+#     - Every turn:
+#         * Generate the 5 legal candidate positions
+#           (UP, DOWN, LEFT, RIGHT, STAY).
+#         * Run ONE multi-goal BFS from Pacman's current position.
+#         * Edge cost = Pacman's turns (supports multi-cell movement).
+#         * Stop once every reachable candidate has been found.
+#         * Move to the candidate requiring the most Pacman turns.
+#     - Falls back to random exploration when Pacman is unknown.
+#     """
+
+#     def __init__(self, **kwargs):
+#         super().__init__()
+
+#         self.name = "Multi-Goal BFS Ghost"
+
+#         # Graph
+#         self.graph = {}
+#         self.graph_ready = False
+
+#         # Memory
+#         self.last_known_enemy_pos = None
+
+#         # Pacman speed (detected once)
+#         self.pacman_speed = None
+
+#     # ------------------------------------------------------------------
+#     # Main entry
+#     # ------------------------------------------------------------------
+
+#     def step(
+#         self,
+#         map_state: np.ndarray,
+#         my_position: tuple,
+#         enemy_position: tuple,
+#         step_number: int,
+#     ) -> Move:
+
+#         # Build graph once
+#         if not self.graph_ready:
+#             self._build_graph(map_state)
+#             self.graph_ready = True
+
+#         # Detect Pacman speed once
+#         if self.pacman_speed is None:
+#             self.pacman_speed = self._detect_pacman_speed()
+
+#         # Update Pacman memory
+#         if enemy_position is not None:
+#             self.last_known_enemy_pos = enemy_position
+
+#         pacman = enemy_position or self.last_known_enemy_pos
+
+#         if pacman is None:
+#             return self._random_move(my_position)
+
+#         return self._multi_goal_bfs(
+#             pacman_position=pacman,
+#             ghost_position=my_position,
+#         )
+
+#     # ------------------------------------------------------------------
+#     # Graph preprocessing
+#     # ------------------------------------------------------------------
+
+#     def _build_graph(self, map_state):
+
+#         rows, cols = map_state.shape
+
+#         directions = [
+#             (-1, 0),
+#             (1, 0),
+#             (0, -1),
+#             (0, 1),
+#         ]
+
+#         for r in range(rows):
+#             for c in range(cols):
+
+#                 if map_state[r, c] != 0:
+#                     continue
+
+#                 node = (r, c)
+#                 self.graph[node] = []
+
+#                 for dr, dc in directions:
+
+#                     nr = r + dr
+#                     nc = c + dc
+
+#                     if (
+#                         0 <= nr < rows
+#                         and 0 <= nc < cols
+#                         and map_state[nr, nc] == 0
+#                     ):
+#                         self.graph[node].append((nr, nc))
+
+#     # ------------------------------------------------------------------
+#     # Multi-goal BFS
+#     # ------------------------------------------------------------------
+
+#     def _multi_goal_bfs(
+#         self,
+#         pacman_position,
+#         ghost_position,
+#     ):
+
+#         candidate_moves = {
+#             Move.STAY: ghost_position,
+#         }
+
+#         for move in [
+#             Move.UP,
+#             Move.DOWN,
+#             Move.LEFT,
+#             Move.RIGHT,
+#         ]:
+
+#             nxt = self._apply_move(ghost_position, move)
+
+#             if nxt in self.graph:
+#                 candidate_moves[move] = nxt
+
+#         remaining = set(candidate_moves.values())
+
+#         distances = {}
+
+#         queue = deque()
+#         queue.append((pacman_position, 0))
+
+#         visited = {pacman_position}
+
+#         while queue and remaining:
+
+#             node, turns = queue.popleft()
+
+#             if node in remaining:
+#                 distances[node] = turns
+#                 remaining.remove(node)
+
+#                 if not remaining:
+#                     break
+
+#             # Expand all positions Pacman can reach in ONE turn
+#             for move in [
+#                 Move.UP,
+#                 Move.DOWN,
+#                 Move.LEFT,
+#                 Move.RIGHT,
+#             ]:
+
+#                 current = node
+
+#                 for _ in range(self.pacman_speed):
+
+#                     nxt = self._apply_move(current, move)
+
+#                     if nxt not in self.graph:
+#                         break
+
+#                     if nxt in visited:
+#                         current = nxt
+#                         continue
+
+#                     visited.add(nxt)
+
+#                     queue.append(
+#                         (
+#                             nxt,
+#                             turns + 1,
+#                         )
+#                     )
+
+#                     current = nxt
+
+#         best_move = Move.STAY
+#         best_score = -1
+
+#         for move, pos in candidate_moves.items():
+
+#             score = distances.get(pos, float("inf"))
+
+#             if score > best_score:
+#                 best_score = score
+#                 best_move = move
+
+#         return best_move
+
+#     # ------------------------------------------------------------------
+#     # Exploration
+#     # ------------------------------------------------------------------
+
+#     def _random_move(self, start):
+
+#         moves = [
+#             Move.UP,
+#             Move.DOWN,
+#             Move.LEFT,
+#             Move.RIGHT,
+#         ]
+
+#         random.shuffle(moves)
+
+#         for move in moves:
+
+#             nxt = self._apply_move(start, move)
+
+#             if nxt in self.graph:
+#                 return move
+
+#         return Move.STAY
+
+#     # ------------------------------------------------------------------
+#     # Pacman speed detection
+#     # ------------------------------------------------------------------
+
+#     def _detect_pacman_speed(self):
+
+#         import inspect
+
+#         try:
+#             for frame_info in inspect.stack():
+
+#                 arena = frame_info.frame.f_locals.get("self")
+
+#                 if (
+#                     arena is not None
+#                     and arena.__class__.__name__ == "Arena"
+#                 ):
+#                     return max(
+#                         1,
+#                         int(getattr(arena, "pacman_speed", 2))
+#                     )
+
+#         except Exception:
+#             pass
+
+#         return 2
+
+#     # ------------------------------------------------------------------
+#     # Helpers
+#     # ------------------------------------------------------------------
+
+#     def _apply_move(self, pos, move):
+
+#         dr, dc = move.value
+#         return (
+#             pos[0] + dr,
+#             pos[1] + dc,
+#         )

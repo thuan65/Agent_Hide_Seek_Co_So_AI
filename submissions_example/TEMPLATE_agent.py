@@ -163,7 +163,32 @@ class GhostAgent(BaseGhostAgent):
         # TODO: Initialize any data structures you need
         # Memory for limited observation mode
         self.last_known_enemy_pos = None
+        
+        # Dynamically retrieve pacman_speed from the Arena instance in the call stack
+        self.pacman_speed = self._detect_pacman_speed()
+
+    def _detect_pacman_speed(self) -> int:
+        import inspect
+        try:
+            for frame_info in inspect.stack():
+                # Look for the 'self' variable of the Arena class in outer frames
+                local_self = frame_info.frame.f_locals.get("self")
+                if local_self and local_self.__class__.__name__ == "Arena":
+                    return getattr(local_self, "pacman_speed", 2)
+        except Exception:
+            pass
+        return 2  # Fallback default if detection fails
     
+    def _detect_pacman_speed(self) -> int:
+        import sys
+        if '--pacman-speed' in sys.argv:
+            try:
+                idx = sys.argv.index('--pacman-speed')
+                return int(sys.argv[idx + 1])
+            except (ValueError, IndexError):
+                pass
+        return 2  # Default value used by arena.py
+
     def step(self, map_state: np.ndarray, 
              my_position: tuple, 
              enemy_position: tuple,
