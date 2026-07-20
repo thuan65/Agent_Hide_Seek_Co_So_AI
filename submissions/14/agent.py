@@ -1,6 +1,5 @@
 import sys
 from pathlib import Path
-import heapq
 
 # Add src to path to import the interface
 src_path = Path(__file__).parent.parent.parent / "src"
@@ -10,16 +9,10 @@ from agent_interface import PacmanAgent as BasePacmanAgent
 from agent_interface import GhostAgent as BaseGhostAgent
 from environment import Move
 import numpy as np
-
-import sys
-from pathlib import Path
-
-# Add src to path to import the interface
-src_path = Path(__file__).parent.parent.parent / "src"
-sys.path.insert(0, str(src_path))
-
+from collections import deque
 from collections import deque as Queue # For BFS queue
 import heapq # For A* priority queue
+import random
 
 class PacmanAgent(BasePacmanAgent):
     def __init__(self, **kwargs):
