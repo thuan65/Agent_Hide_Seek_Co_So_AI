@@ -9,16 +9,25 @@ from agent_interface import PacmanAgent as BasePacmanAgent
 from agent_interface import GhostAgent as BaseGhostAgent
 from environment import Move
 import numpy as np
+from collections import deque
 from collections import deque as Queue # For BFS queue
 import heapq # For A* priority queue
-
-
+import random
 
 class PacmanAgent(BasePacmanAgent):
     def __init__(self, **kwargs):
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
         super().__init__(**kwargs)
         self.name = "TVS Pacman"
+        
+         # Memory
+        self.last_known_enemy_pos = None
+
+        # Previous Pacman position
+        self.previous_position = None
+
+        # Ghost history for juke detection
+        self.ghost_history = deque(maxlen=3)
         
         self.height = 0
         self.width = 0
@@ -49,7 +58,7 @@ class PacmanAgent(BasePacmanAgent):
         self.graphInitialized = True                    
     
     ######################### Search Algorithm Implementation #########################
-    def A_star(self, start: tuple, goal: tuple):
+    def A_star(self, start: tuple, goal: tuple, block_previous=False):
         if start == goal:
             return []
 
@@ -70,6 +79,15 @@ class PacmanAgent(BasePacmanAgent):
                 continue
             
             for neighbor in self.graph.get(current_node, []):
+                
+                if (
+                    block_previous
+                    and self.previous_position is not None
+                    # and steps == 1
+                    and current_node == self.previous_position
+                ):
+                    break
+                
                 tentative_g_score = current_g + 1
                 
                 if neighbor not in visited or tentative_g_score < visited.get(neighbor, float('inf')):
@@ -116,6 +134,56 @@ class PacmanAgent(BasePacmanAgent):
     def _is_valid_position(self, pos: tuple) -> bool:
        return pos in self.graph
    
+   # ------------------------------------------------------------------
+    # Exploration
+    # ------------------------------------------------------------------
+
+    def _explore(self, start):
+
+        moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
+        random.shuffle(moves)
+
+        for move in moves:
+
+            current = start
+
+            steps = 0
+
+            while steps < self.pacman_speed:
+
+                nxt = self._apply_move(current, move)
+
+                if nxt not in self.graph:
+                    break
+
+                current = nxt
+                steps += 1
+
+            if steps > 0:
+                return (move, steps)
+
+        return (Move.STAY, 1)
+
+    # ------------------------------------------------------------------
+    # Ghost juke detection
+    # ------------------------------------------------------------------
+
+    def _ghost_is_juking(self):
+
+        if len(self.ghost_history) < 3:
+            return False
+
+        return self.ghost_history[0] == self.ghost_history[2]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _apply_move(self, pos, move):
+
+        dr, dc = move.value
+        return (pos[0] + dr, pos[1] + dc)
+   
     ############################### H_M  ###################################
     def step(self, map_state: np.ndarray, 
              my_position: tuple, 
@@ -125,16 +193,30 @@ class PacmanAgent(BasePacmanAgent):
         if self.graphInitialized == False:
             self._init_graph(map_state)
             self.graphInitialized = True
+            
+        if enemy_position is not None:
+            self.last_known_enemy_pos = enemy_position
+            self.ghost_history.append(enemy_position)
+            
+        target = enemy_position or self.last_known_enemy_pos
         
-        path = self.A_star(my_position, enemy_position)
-        if not path or len(path) < 2:
-            return (Move.STAY, 1)
+        if target is None:
+            action = self._explore(my_position)
+        else:
+            ghost_juking = self._ghost_is_juking()
+
+            path = self.A_star(start= my_position, goal= enemy_position, block_previous=ghost_juking)
+            if not path or len(path) < 2:
+                return (Move.STAY, 1)
         
-        action = self._choose_action_and_step_number_next_cell(path[0], path[1])
+            action = self._choose_action_and_step_number_next_cell(path[0], path[1])
+        
+            if action is None:
+                action = self._explore(my_position)
+
+        self.previous_position = my_position
         
         return action
-
-        
 
 
 class GhostAgent(BaseGhostAgent):
