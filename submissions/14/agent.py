@@ -18,7 +18,7 @@ class PacmanAgent(BasePacmanAgent):
     def __init__(self, **kwargs):
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
         super().__init__(**kwargs)
-        self.name = "TVS Pacman"
+        self.name = "TVS Pacman Graph ver"
         
          # Memory
         self.last_known_enemy_pos = None
