@@ -1,327 +1,492 @@
 import sys
-from collections import deque
-from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
-
+import heapq
 import numpy as np
+from pathlib import Path
+from collections import deque as Queue  # For BFS queue
 
+# Add src to path to import the interface
 src_path = Path(__file__).parent.parent.parent / "src"
-sys.path.insert(0, str(src_path))
+if str(src_path) not in sys.path:
+    sys.path.insert(0, str(src_path))
 
-from agent_interface import GhostAgent as BaseGhostAgent
 from agent_interface import PacmanAgent as BasePacmanAgent
+from agent_interface import GhostAgent as BaseGhostAgent
 from environment import Move
 
 
-Position = Tuple[int, int]
-
-MOVE_ORDER = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
-
-
 class PacmanAgent(BasePacmanAgent):
-    """Pacman agent that chases the ghost with BFS/A* style planning."""
-
+    """
+    Upgraded Pacman (Seeker) with Frontier Exploration & Memory for Blind Setting.
+    """
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
-        self.name = "Pathfinder Pacman"
-        self.last_known_enemy_pos: Optional[Position] = None
-        self.visited: Set[Position] = set()
-        self.path_cache: List[Move] = []
-        self.cached_map_signature: Optional[Tuple[int, int, bytes]] = None
-        self.valid_cells: Set[Position] = set()
+        super().__init__(**kwargs)
+        self.name = "TVS Pacman Blind"
+        
+        # Memory & Exploration state tracking
+        self.last_known_enemy_pos = None
+        self.global_map = None  # Tracks explored paths (0: empty, 1: wall, -1: unexplored)
+        
+        # Performance/Lookup caches
+        self.valid_cells = set()
+        self.neighbor_cache = {}
+        self.astar_cache = {}
+        self.initialized = False
 
-    def _map_signature(self, map_state: np.ndarray) -> Tuple[int, int, bytes]:
-        return (map_state.shape[0], map_state.shape[1], map_state.tobytes())
-
-    def _is_valid_position(self, pos: Position, map_state: np.ndarray) -> bool:
-        row, col = pos
+    def _init_caches(self, map_state: np.ndarray):
+        """Precompute the entire traversable maze structure at step 1 since walls are always visible."""
         height, width = map_state.shape
-        if row < 0 or row >= height or col < 0 or col >= width:
-            return False
-        return map_state[row, col] == 0
-
-    def _neighbors(self, pos: Position, map_state: np.ndarray):
-        for move in MOVE_ORDER:
-            delta_row, delta_col = move.value
-            next_pos = (pos[0] + delta_row, pos[1] + delta_col)
-            if self._is_valid_position(next_pos, map_state):
-                yield next_pos, move
-
-    def _build_valid_cells(self, map_state: np.ndarray):
+        # Walls are always 1, any cell that is not 1 is a traversable path (or will be)
         self.valid_cells = {
-            (row, col)
-            for row in range(map_state.shape[0])
-            for col in range(map_state.shape[1])
-            if map_state[row, col] == 0
+            (r, c) for r in range(height) for c in range(width) if map_state[r, c] != 1
         }
+        self.neighbor_cache = {}
+        for r, c in self.valid_cells:
+            neighbors = []
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                dr, dc = move.value
+                nr, nc = r + dr, c + dc
+                if (nr, nc) in self.valid_cells:
+                    neighbors.append(((nr, nc), move))
+            self.neighbor_cache[(r, c)] = neighbors
+            
+        # Initialize the global map tracking: walls are 1, everything else starts as -1 (unexplored)
+        self.global_map = np.where(map_state == 1, 1, -1)
+        self.initialized = True
+        
+    def _find_nearest_unexplored(self, start: tuple) -> tuple:
+        """Run BFS to find the closest unexplored empty path (-1) on the global map."""
+        queue = Queue([start])
+        visited = {start}
+        while queue:
+            curr = queue.popleft()
+            if self.global_map[curr[0], curr[1]] == -1:
+                return curr
+            for neighbor, _ in self.neighbor_cache.get(curr, []):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+        return None
 
-    def _bfs_path(self, start: Position, goal: Position, map_state: np.ndarray) -> List[Move]:
+    def _explore_random(self, pos: tuple):
+        """Emergency random walk if exploration target is unreachable."""
+        import random
+        valid_moves = []
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            dr, dc = move.value
+            nxt = (pos[0] + dr, pos[1] + dc)
+            if nxt in self.valid_cells:
+                valid_moves.append(move)
+        if valid_moves:
+            return (random.choice(valid_moves), 1)
+        return (Move.STAY, 1)
+
+    def A_star(self, start: tuple, goal: tuple):
         if start == goal:
             return []
-        if goal not in self.valid_cells or start not in self.valid_cells:
-            return []
+        
+        cache_key = (start, goal)
+        if cache_key in self.astar_cache:
+            return self.astar_cache[cache_key]
+        
+        open_set = []
+        heapq.heappush(open_set, (0 + self.manhattan_distance(start, goal), 0, start))
 
-        queue = deque([start])
-        parent: Dict[Position, Tuple[Optional[Position], Optional[Move]]] = {
-            start: (None, None)
-        }
+        g_score = {start: 0}
+        parent = {}
+        moves = [Move.UP.value, Move.DOWN.value, Move.LEFT.value, Move.RIGHT.value]
 
-        while queue:
-            current = queue.popleft()
-            if current == goal:
-                break
-            for next_pos, move in self._neighbors(current, map_state):
-                if next_pos not in parent:
-                    parent[next_pos] = (current, move)
-                    queue.append(next_pos)
+        while open_set:
+            current_f, current_g, current_pos = heapq.heappop(open_set)
 
-        if goal not in parent:
-            return []
-
-        path: List[Move] = []
-        current = goal
-        while parent[current][0] is not None:
-            prev, move = parent[current]
-            path.append(move)
-            current = prev
-        path.reverse()
-        return path
-
-    def _frontier_targets(self, map_state: np.ndarray) -> List[Position]:
-        targets = []
-        for row, col in self.valid_cells:
-            for move in MOVE_ORDER:
-                delta_row, delta_col = move.value
-                next_pos = (row + delta_row, col + delta_col)
-                if 0 <= next_pos[0] < map_state.shape[0] and 0 <= next_pos[1] < map_state.shape[1]:
-                    if map_state[next_pos] == -1:
-                        targets.append((row, col))
-                        break
-        return targets
-
-    def _closest_reachable_target(self, start: Position, candidates: List[Position], map_state: np.ndarray) -> List[Move]:
-        best_path: List[Move] = []
-        best_length = float("inf")
-        for target in candidates:
-            path = self._bfs_path(start, target, map_state)
-            if path and len(path) < best_length:
-                best_path = path
-                best_length = len(path)
-        return best_path
-
-    def _compress_path(self, path: List[Move]) -> Tuple[Move, int]:
-        if not path:
-            return Move.STAY, 1
-        first_move = path[0]
-        steps = 1
-        for move in path[1:]:
-            if move != first_move or steps >= self.pacman_speed:
-                break
-            steps += 1
-        return first_move, steps
-
-    def _fallback_greedy(self, my_position: Position, target: Position, map_state: np.ndarray) -> Tuple[Move, int]:
-        best_move = Move.STAY
-        best_score = float("inf")
-        for move in MOVE_ORDER:
-            delta_row, delta_col = move.value
-            next_pos = (my_position[0] + delta_row, my_position[1] + delta_col)
-            if not self._is_valid_position(next_pos, map_state):
-                continue
-            score = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
-            if next_pos in self.visited:
-                score += 0.5
-            if score < best_score:
-                best_score = score
-                best_move = move
-        if best_move == Move.STAY:
-            return Move.STAY, 1
-        return best_move, 1
-
-    def step(
-        self,
-        map_state: np.ndarray,
-        my_position: tuple,
-        enemy_position: tuple,
-        step_number: int,
-    ):
-        if enemy_position is not None:
-            self.last_known_enemy_pos = enemy_position
-
-        self.visited.add(my_position)
-
-        current_signature = self._map_signature(map_state)
-        if self.cached_map_signature != current_signature:
-            self.cached_map_signature = current_signature
-            self.path_cache = []
-            self._build_valid_cells(map_state)
-
-        target = enemy_position or self.last_known_enemy_pos
-
-        if target is not None:
-            path = self._bfs_path(my_position, target, map_state)
-            if not path:
-                path = self._fallback_greedy(my_position, target, map_state)
+            if current_pos == goal: # Path Found
+                path = []
+                curr = goal
+                while curr != start:
+                    path.append(curr)
+                    curr = parent[curr]
+                path.append(start)
+                path.reverse()
+                self.astar_cache[cache_key] = path
                 return path
-            return self._compress_path(path)
 
-        frontier_targets = self._frontier_targets(map_state)
-        if frontier_targets:
-            path = self._closest_reachable_target(my_position, frontier_targets, map_state)
-            if path:
-                return self._compress_path(path)
+            if current_g > g_score.get(current_pos, float('inf')):
+                continue
+            
+            for delta_row, delta_col in moves:
+                neighbor = (current_pos[0] + delta_row, current_pos[1] + delta_col)
 
-        for move in MOVE_ORDER:
-            delta_row, delta_col = move.value
-            next_pos = (my_position[0] + delta_row, my_position[1] + delta_col)
-            if self._is_valid_position(next_pos, map_state):
-                return move, 1
+                if neighbor in self.valid_cells:
+                    tentative_g_score = g_score[current_pos] + 1
 
-        return Move.STAY, 1
+                    if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                        parent[neighbor] = current_pos
+                        g_score[neighbor] = tentative_g_score
+                        f_score = tentative_g_score + self.manhattan_distance(neighbor, goal)
+                        heapq.heappush(open_set, (f_score, tentative_g_score, neighbor))
+
+        self.astar_cache[cache_key] = None  # No path found
+        return None
+
+    def _alphabeta(self, pac_pos: tuple, ghost_pos: tuple, depth: int, alpha: float, beta: float, is_max: bool) -> float:
+        """Shallow depth alphabeta adversarial minimax."""
+        if depth == 0 or pac_pos == ghost_pos:
+            return self._evaluate_state(pac_pos, ghost_pos)
+
+        if is_max:
+            max_val = -float('inf')
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                for steps in range(1, self.pacman_speed + 1):
+                    next_pos = pac_pos
+                    valid = True
+                    for _ in range(steps):
+                        dr, dc = move.value
+                        candidate = (next_pos[0] + dr, next_pos[1] + dc)
+                        if candidate in self.valid_cells:
+                            next_pos = candidate
+                        else:
+                            valid = False
+                            break
+                    if not valid:
+                        continue
+                    val = self._alphabeta(next_pos, ghost_pos, depth - 1, alpha, beta, False)
+                    max_val = max(max_val, val)
+                    alpha = max(alpha, val)
+                    if beta <= alpha:
+                        break
+            return max_val
+        else:
+            min_val = float('inf')
+            ghost_moves = self.neighbor_cache.get(ghost_pos, [])
+            for neighbor, _ in ghost_moves:
+                val = self._alphabeta(pac_pos, neighbor, depth - 1, alpha, beta, True)
+                min_val = min(min_val, val)
+                beta = min(beta, val)
+                if beta <= alpha:
+                    break
+            return min_val
+
+    def _evaluate_state(self, pac_pos: tuple, ghost_pos: tuple) -> float:
+        if pac_pos == ghost_pos:
+            return 100000.0
+
+        path = self.A_star(pac_pos, ghost_pos)
+        _dist = (len(path) - 1) if path else self.manhattan_distance(pac_pos, ghost_pos)
+
+        ghost_moves = self.neighbor_cache.get(ghost_pos, [])
+        ghost_mobility = len(ghost_moves)
+
+        distance_penalty = _dist * 50.0
+        close_bonus = 0.0
+        if _dist <= 2:
+            close_bonus = (3 - _dist) * 2000.0
+        elif _dist <= 4:
+            close_bonus = (5 - _dist) * 200.0
+        
+        trap_score = (4 - ghost_mobility) * 25.0
+        score = - distance_penalty + trap_score * 0.9 + close_bonus
+        return score
+
+    def manhattan_distance(self, pos1: tuple, pos2: tuple) -> int:
+        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+
+    def _get_move_direction(self, from_pos: tuple, to_pos: tuple) -> Move:
+        row_diff = to_pos[0] - from_pos[0]
+        col_diff = to_pos[1] - from_pos[1]
+        if row_diff == -1 and col_diff == 0:
+            return Move.UP
+        if row_diff == 1 and col_diff == 0:
+            return Move.DOWN
+        if row_diff == 0 and col_diff == -1:
+            return Move.LEFT
+        if row_diff == 0 and col_diff == 1:
+            return Move.RIGHT
+        return Move.STAY
+
+    def step(self, map_state: np.ndarray, 
+             my_position: tuple, 
+             enemy_position: tuple,
+             step_number: int):
+        
+        if not self.initialized:
+            self._init_caches(map_state)
+
+        # Clear temporal path cache to keep search updated
+        self.astar_cache.clear()
+        
+        # Update global map with newly explored areas
+        self.global_map[map_state == 0] = 0
+        my_position = tuple(my_position)
+
+        if enemy_position is not None:
+            self.last_known_enemy_pos = tuple(enemy_position)
+            target = self.last_known_enemy_pos
+        else:
+            target = self.last_known_enemy_pos
+
+        # If we reached the target but the enemy is no longer there, clear memory
+        if target is not None and my_position == target:
+            self.last_known_enemy_pos = None
+            target = None
+
+        # --- EXPLORATION & TARGET RECOVERY PHASE ---
+        if target is None:
+            # Active Search: BFS to find the closest unexplored empty path (-1)
+            explore_target = self._find_nearest_unexplored(my_position)
+            if explore_target is not None:
+                path = self.A_star(my_position, explore_target)
+                if path and len(path) > 1:
+                    next_pos = path[1]
+                    move = self._get_move_direction(my_position, next_pos)
+                    steps = 1
+                    if len(path) >= 3 and self.pacman_speed >= 2:
+                        next_next_pos = path[2]
+                        if move == self._get_move_direction(next_pos, next_next_pos):
+                            steps = 2
+                    return (move, steps)
+            return self._explore_random(my_position)
+
+        # If enemy is not currently visible but we have their memory: Sprint directly to the memory spot
+        if enemy_position is None and target is not None:
+            path = self.A_star(my_position, target)
+            if path and len(path) > 1:
+                next_pos = path[1]
+                move = self._get_move_direction(my_position, next_pos)
+                steps = 1
+                if len(path) >= 3 and self.pacman_speed >= 2:
+                    next_next_pos = path[2]
+                    if move == self._get_move_direction(next_pos, next_next_pos):
+                        steps = 2
+                return (move, steps)
+            return self._explore_random(my_position)
+
+        # --- ACTIVE ENGAGEMENT PHASE (Enemy is currently visible) ---
+        best_action = (Move.STAY, 1)
+        best_score = -float('inf')
+
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            for steps in range(1, self.pacman_speed + 1):
+                next_pos = my_position
+                valid = True
+                
+                for _ in range(steps):
+                    dr, dc = move.value
+                    candidate = (next_pos[0] + dr, next_pos[1] + dc)
+                    if candidate in self.valid_cells:
+                        next_pos = candidate
+                    else:
+                        valid = False
+                        break
+                        
+                if not valid:
+                    continue
+
+                if next_pos == target:
+                    return (move, steps)
+                
+                score = self._alphabeta(next_pos, target, depth=3, alpha=-float('inf'), beta=float('inf'), is_max=False)
+
+                if score > best_score or (score == best_score and steps > best_action[1] and best_action[0] == move):
+                    best_score = score
+                    best_action = (move, steps)
+                    
+        return best_action
 
 
 class GhostAgent(BaseGhostAgent):
-    """Ghost agent that maximizes distance from Pacman and avoids traps."""
-
+    """
+    Ghost (Hider) Agent optimized with dynamic graph caching & escape-planning for Blind mode.
+    """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.name = "Escape Ghost"
-        self.last_known_enemy_pos: Optional[Position] = None
-        self.visited: Dict[Position, int] = {}
-        self.dead_ends: Set[Position] = set()
-        self.cached_map_signature: Optional[Tuple[int, int, bytes]] = None
-        self.valid_cells: Set[Position] = set()
-        self.neighbor_cache: Dict[Position, List[Position]] = {}
-
-    def _map_signature(self, map_state: np.ndarray) -> Tuple[int, int, bytes]:
-        return (map_state.shape[0], map_state.shape[1], map_state.tobytes())
-
-    def _is_valid_position(self, pos: Position, map_state: np.ndarray) -> bool:
-        row, col = pos
-        height, width = map_state.shape
-        if row < 0 or row >= height or col < 0 or col >= width:
-            return False
-        return map_state[row, col] == 0
-
-    def _neighbors(self, pos: Position, map_state: np.ndarray):
-        for move in MOVE_ORDER:
-            delta_row, delta_col = move.value
-            next_pos = (pos[0] + delta_row, pos[1] + delta_col)
-            if self._is_valid_position(next_pos, map_state):
-                yield next_pos, move
-
-    def _build_graph(self, map_state: np.ndarray):
-        self.valid_cells = {
-            (row, col)
-            for row in range(map_state.shape[0])
-            for col in range(map_state.shape[1])
-            if map_state[row, col] == 0
-        }
+        self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 2)))
+        self.name = "Territory Minimax Ghost Blind"
+        
+        # Memory & Precomputed Cache
+        self.last_known_enemy_pos = None
+        self.valid_cells = set()
         self.neighbor_cache = {}
-        degree: Dict[Position, int] = {}
+        self.dead_ends = set()
+        self.initialized = False
 
-        for cell in self.valid_cells:
-            neighbors = [neighbor for neighbor, _ in self._neighbors(cell, map_state)]
-            self.neighbor_cache[cell] = neighbors
-            degree[cell] = len(neighbors)
+    def _init_caches(self, map_state: np.ndarray):
+        """Precompute the map layout at step 1 since walls are always visible."""
+        height, width = map_state.shape
+        self.valid_cells = {
+            (r, c) for r in range(height) for c in range(width) if map_state[r, c] != 1
+        }
+        
+        self.neighbor_cache = {}
+        for r, c in self.valid_cells:
+            neighbors = []
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                dr, dc = move.value
+                nr, nc = r + dr, c + dc
+                if (nr, nc) in self.valid_cells:
+                    neighbors.append(((nr, nc), move))
+            self.neighbor_cache[(r, c)] = neighbors
 
-        queue = deque([cell for cell, deg in degree.items() if deg <= 1])
-        dead_ends: Set[Position] = set()
+        # Iteratively identify structural dead-ends (corridors with 1 escape route)
+        degrees = {cell: len(neighs) for cell, neighs in self.neighbor_cache.items()}
+        dead_ends = set()
+        queue = [cell for cell, deg in degrees.items() if deg <= 1]
         while queue:
-            cell = queue.popleft()
-            if cell in dead_ends:
-                continue
-            dead_ends.add(cell)
-            for neighbor in self.neighbor_cache.get(cell, []):
+            curr = queue.pop(0)
+            dead_ends.add(curr)
+            for neighbor, _ in self.neighbor_cache.get(curr, []):
                 if neighbor not in dead_ends:
-                    remaining = sum(1 for x in self.neighbor_cache.get(neighbor, []) if x not in dead_ends)
-                    if remaining <= 1:
+                    valid_neighs = [n for n, _ in self.neighbor_cache[neighbor] if n not in dead_ends]
+                    if len(valid_neighs) <= 1:
                         queue.append(neighbor)
         self.dead_ends = dead_ends
+        self.initialized = True
 
-    def _distance(self, start: Position, goal: Position) -> int:
+    def _get_distance(self, start: tuple, goal: tuple) -> int:
         if start == goal:
             return 0
-        queue = deque([(start, 0)])
+        queue = [(start, 0)]
         visited = {start}
         while queue:
-            current, dist = queue.popleft()
-            if current == goal:
+            curr, dist = queue.pop(0)
+            if curr == goal:
                 return dist
-            for neighbor in self.neighbor_cache.get(current, []):
+            for neighbor, _ in self.neighbor_cache.get(curr, []):
                 if neighbor not in visited:
                     visited.add(neighbor)
                     queue.append((neighbor, dist + 1))
         return 999
 
-    def _score_move(self, my_position: Position, move: Move, threat: Position, map_state: np.ndarray) -> float:
-        delta_row, delta_col = move.value
-        next_pos = (my_position[0] + delta_row, my_position[1] + delta_col)
-        if not self._is_valid_position(next_pos, map_state):
-            return -float("inf")
+    def _analyze_territory(self, ghost_pos: tuple, pac_pos: tuple) -> tuple:
+        queue = [ghost_pos]
+        visited = {ghost_pos}
+        total_branching = 0
+        
+        while queue:
+            curr = queue.pop(0)
+            neighbors = self.neighbor_cache.get(curr, [])
+            total_branching += len(neighbors)
+            for neighbor, _ in neighbors:
+                if neighbor != pac_pos and neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+                    
+        territory_size = len(visited)
+        branching_factor = total_branching / max(1, territory_size)
+        return territory_size, branching_factor
 
-        distance = abs(next_pos[0] - threat[0]) + abs(next_pos[1] - threat[1])
-        graph_distance = self._distance(next_pos, threat)
-        visit_penalty = self.visited.get(next_pos, 0) * 1.5
-        dead_end_penalty = 12.0 if next_pos in self.dead_ends else 0.0
-        wall_pressure = 0
-        for neighbor in self.neighbor_cache.get(next_pos, []):
-            if len(self.neighbor_cache.get(neighbor, [])) <= 2:
-                wall_pressure += 1
+    def _evaluate_state(self, ghost_pos: tuple, pac_pos: tuple) -> float:
+        if ghost_pos == pac_pos:
+            return -10000.0
 
-        return (
-            graph_distance * 6.0
-            + distance * 3.0
-            + wall_pressure * 2.0
-            - visit_penalty
-            - dead_end_penalty
+        pac_dist = self._get_distance(ghost_pos, pac_pos)
+        territory_size, branching_factor = self._analyze_territory(ghost_pos, pac_pos)
+        
+        dead_end_penalty = 1.0 if ghost_pos in self.dead_ends else 0.0
+        trap_risk = 1.0 if pac_dist <= 3 else 0.0
+
+        score = (
+            territory_size * 6.0
+            + branching_factor * 10.0
+            + pac_dist * 4.0
+            - dead_end_penalty * 20.0
+            - trap_risk * 25.0
         )
+        return score
 
-    def step(
-        self,
-        map_state: np.ndarray,
-        my_position: tuple,
-        enemy_position: tuple,
-        step_number: int,
-    ) -> Move:
+    def _alphabeta(self, ghost_pos: tuple, pac_pos: tuple, depth: int, alpha: float, beta: float, is_max: bool) -> float:
+        if depth == 0 or ghost_pos == pac_pos:
+            return self._evaluate_state(ghost_pos, pac_pos)
+
+        if is_max:
+            max_val = -float('inf')
+            candidates = []
+            for neighbor, move in self.neighbor_cache.get(ghost_pos, []):
+                dist = abs(neighbor[0] - pac_pos[0]) + abs(neighbor[1] - pac_pos[1])
+                candidates.append((dist, neighbor, move))
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            candidates.append((abs(ghost_pos[0] - pac_pos[0]) + abs(ghost_pos[1] - pac_pos[1]), ghost_pos, Move.STAY))
+
+            for _, next_pos, _ in candidates:
+                val = self._alphabeta(next_pos, pac_pos, depth - 1, alpha, beta, False)
+                max_val = max(max_val, val)
+                alpha = max(alpha, val)
+                if beta <= alpha:
+                    break
+            return max_val
+        else:
+            min_val = float('inf')
+            pac_moves = []
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                for steps in range(1, self.pacman_speed + 1):
+                    next_pos = pac_pos
+                    valid = True
+                    for _ in range(steps):
+                        dr, dc = move.value
+                        candidate = (next_pos[0] + dr, next_pos[1] + dc)
+                        if candidate in self.valid_cells:
+                            next_pos = candidate
+                        else:
+                            valid = False
+                            break
+                    if not valid and next_pos == pac_pos:
+                        continue
+                    dist = abs(next_pos[0] - ghost_pos[0]) + abs(next_pos[1] - ghost_pos[1])
+                    pac_moves.append((dist, next_pos))
+                    
+            pac_moves.sort(key=lambda x: x[0])
+            for _, next_pos in pac_moves[:4]:
+                val = self._alphabeta(ghost_pos, next_pos, depth - 1, alpha, beta, True)
+                min_val = min(min_val, val)
+                beta = min(beta, val)
+                if beta <= alpha:
+                    break
+            return min_val
+
+    def step(self, map_state: np.ndarray, 
+             my_position: tuple, 
+             enemy_position: tuple,
+             step_number: int) -> Move:
+        if not self.initialized:
+            self._init_caches(map_state)
+            
+        my_position = tuple(my_position)
         if enemy_position is not None:
-            self.last_known_enemy_pos = enemy_position
+            self.last_known_enemy_pos = tuple(enemy_position)
+            
+        threat = self.last_known_enemy_pos
 
-        current_signature = self._map_signature(map_state)
-        if self.cached_map_signature != current_signature:
-            self.cached_map_signature = current_signature
-            self._build_graph(map_state)
+        # If we reached Pacman's last known location and they are gone, clear memory
+        if threat is not None and my_position == threat:
+            self.last_known_enemy_pos = None
+            threat = None
 
-        self.visited[my_position] = self.visited.get(my_position, 0) + 1
-
-        threat = enemy_position or self.last_known_enemy_pos
-
+        # Fallback Behavior: active evasion by maximizing local mobility when Pacman is out of sight
         if threat is None:
             best_move = Move.STAY
-            best_score = -float("inf")
-            for move in MOVE_ORDER:
-                score = self._score_move(my_position, move, my_position, map_state)
+            best_score = -float('inf')
+            for neighbor, move in self.neighbor_cache.get(my_position, []):
+                score = len(self.neighbor_cache.get(neighbor, []))
                 if score > best_score:
                     best_score = score
                     best_move = move
-            return best_move if best_move != Move.STAY else Move.STAY
+            return best_move
 
         best_move = Move.STAY
-        best_score = -float("inf")
-        for move in MOVE_ORDER:
-            score = self._score_move(my_position, move, threat, map_state)
+        best_score = -float('inf')
+
+        # Generate, rank and filter Ghost candidate moves
+        candidates = []
+        for neighbor, move in self.neighbor_cache.get(my_position, []):
+            dist = abs(neighbor[0] - threat[0]) + abs(neighbor[1] - threat[1])
+            candidates.append((dist, neighbor, move))
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        candidates.append((abs(my_position[0] - threat[0]) + abs(my_position[1] - threat[1]), my_position, Move.STAY))
+
+        # Shallow 4-depth lookahead evaluation
+        for _, next_pos, move in candidates:
+            score = self._alphabeta(next_pos, threat, depth=4, alpha=-float('inf'), beta=float('inf'), is_max=False)
             if score > best_score:
                 best_score = score
                 best_move = move
 
-        if best_move != Move.STAY:
-            return best_move
-
-        for move in MOVE_ORDER:
-            delta_row, delta_col = move.value
-            next_pos = (my_position[0] + delta_row, my_position[1] + delta_col)
-            if self._is_valid_position(next_pos, map_state):
-                return move
-
-        return Move.STAY
+        return best_move
