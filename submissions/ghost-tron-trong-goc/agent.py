@@ -226,22 +226,26 @@ class PacmanAgent(BasePacmanAgent):
 
 class GhostAgent(BaseGhostAgent):
     """
-    Version 2 Ghost Agent designed for Pacman vs Ghost Hide-and-Seek.
+    Version 2.1 Ghost Agent designed for Pacman vs Ghost Hide-and-Seek.
     
-    Exploits static map properties and upper-half spawn bias in random spawn mode:
-    1. Evaluates distance to both hiding pockets on step 1 and selects the nearer one.
-    2. Adapts BFS move preferences based on spawn row to maximize vertical distance
-       from Pacman (prioritizing UP when spawned below Row 5, and delaying DOWN when spawned above).
-    3. Stays permanently at the chosen pocket once reached.
+    Exploits static map properties and Pacman's leftward search bias:
+    1. Prefers Right Pocket (5, 12) unless Left Pocket (5, 8) is strictly closer 
+       by more than 2 steps (dist_left + 2 < dist_right).
+    2. Runs pure BFS to guarantee shortest distance path without lower-map detours.
+    3. Adapts BFS move preferences based on spawn row (prioritizing UP when spawned below Row 5).
+    4. Stays permanently at the chosen pocket once reached.
     """
 
     TARGET_ROW = 5
     LEFT_POCKET = (5, 8)
     RIGHT_POCKET = (5, 12)
+    
+    # Margin of tolerance: Right pocket is chosen unless Left is > 2 tiles closer
+    RIGHT_BIAS_MARGIN = 2
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.name = "Proximity Pocket Exploiter Ghost v2"
+        self.name = "Right-Biased Pocket Ghost v2.1"
 
         # Navigation state precomputed on step 1
         self.target_pocket = None
@@ -256,7 +260,7 @@ class GhostAgent(BaseGhostAgent):
         Executes one environment tick for the Ghost Agent.
         
         Ignores enemy_position. Performs single-pass dual-path calculation on step 1,
-        follows the optimized path to the nearest pocket, and stays forever.
+        follows the optimized path to the chosen pocket, and stays forever.
         """
         # Step 1: Initialize target pocket choice and precompute path
         if self.planned_moves is None:
@@ -273,8 +277,9 @@ class GhostAgent(BaseGhostAgent):
 
     def _plan_route_to_best_pocket(self, start_pos: tuple, map_state: np.ndarray) -> list:
         """
-        Calculates shortest paths to both left and right pockets, chooses the nearer pocket,
-        and breaks distance ties randomly.
+        Calculates shortest paths to both pockets using standard BFS.
+        Applies a bias toward the Right Pocket unless the Left Pocket is strictly closer
+        by more than RIGHT_BIAS_MARGIN steps.
         """
         path_left = self._bfs_shortest_path(start_pos, self.LEFT_POCKET, map_state)
         path_right = self._bfs_shortest_path(start_pos, self.RIGHT_POCKET, map_state)
@@ -282,29 +287,22 @@ class GhostAgent(BaseGhostAgent):
         dist_left = len(path_left)
         dist_right = len(path_right)
 
-        # Select the strictly nearer pocket path
-        if dist_left < dist_right:
+        # Only select Left Pocket if it is strictly closer by more than RIGHT_BIAS_MARGIN (2 tiles)
+        if dist_left + self.RIGHT_BIAS_MARGIN < dist_right:
             self.target_pocket = self.LEFT_POCKET
             return path_left
-        elif dist_right < dist_left:
+        else:
+            # Commit 100% to Right Pocket when equal, closer, or up to 2 steps further
             self.target_pocket = self.RIGHT_POCKET
             return path_right
-        else:
-            # Equidistant from both pockets: pick randomly to remain unpredictable
-            if random.random() < 0.5:
-                self.target_pocket = self.LEFT_POCKET
-                return path_left
-            else:
-                self.target_pocket = self.RIGHT_POCKET
-                return path_right
 
     def _bfs_shortest_path(self, start_pos: tuple, target_pos: tuple, map_state: np.ndarray) -> list:
         """
-        Runs BFS to find the shortest path from start_pos to target_pos.
+        Runs pure unweighted BFS to find the shortest path from start_pos to target_pos.
         
         Dynamically adjusts neighbor expansion order based on spawn row:
-        - Spawned below Row 5: Prioritizes UP early to increase vertical distance from Pacman.
-        - Spawned at or above Row 5: Prioritizes horizontal moves (LEFT/RIGHT) and UP before DOWN
+        - Spawned below Row 5: Prioritizes UP early, and RIGHT over LEFT.
+        - Spawned at or above Row 5: Prioritizes RIGHT/LEFT and UP before DOWN
           to delay downward moves into Pacman's threat zone.
         """
         if start_pos == target_pos:
@@ -314,18 +312,18 @@ class GhostAgent(BaseGhostAgent):
 
         # Determine directional search order based on spawn elevation relative to Row 5
         if spawn_row > self.TARGET_ROW:
-            # Below target: Move UP early to climb away from lower half
+            # Below target: Move UP early, prefer RIGHT over LEFT
             directions = [
                 ((-1, 0), Move.UP),
-                ((0, -1), Move.LEFT),
                 ((0, 1), Move.RIGHT),
+                ((0, -1), Move.LEFT),
                 ((1, 0), Move.DOWN)
             ]
         else:
-            # At or above target: Move sideways first, delay DOWN as late as possible
+            # At or above target: Move RIGHT/LEFT first, delay DOWN as late as possible
             directions = [
-                ((0, -1), Move.LEFT),
                 ((0, 1), Move.RIGHT),
+                ((0, -1), Move.LEFT),
                 ((-1, 0), Move.UP),
                 ((1, 0), Move.DOWN)
             ]
