@@ -226,22 +226,24 @@ class PacmanAgent(BasePacmanAgent):
 
 class GhostAgent(BaseGhostAgent):
     """
-    Version 1 Ghost Agent designed for Pacman vs Ghost Hide-and-Seek.
+    Version 2 Ghost Agent designed for Pacman vs Ghost Hide-and-Seek.
     
-    Exploits environment properties (static maze, upper-half spawn bias, and observation rules)
-    by selecting a designated hiding pocket on step 1, calculating a tie-broken shortest path 
-    that prioritizes moving UP as early as possible, and staying at the target forever.
+    Exploits static map properties and upper-half spawn bias in random spawn mode:
+    1. Evaluates distance to both hiding pockets on step 1 and selects the nearer one.
+    2. Adapts BFS move preferences based on spawn row to maximize vertical distance
+       from Pacman (prioritizing UP when spawned below Row 5, and delaying DOWN when spawned above).
+    3. Stays permanently at the chosen pocket once reached.
     """
 
-    # Hiding pocket target coordinates (row, col)
+    TARGET_ROW = 5
     LEFT_POCKET = (5, 8)
     RIGHT_POCKET = (5, 12)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.name = "Pocket Exploiter Ghost v1"
+        self.name = "Proximity Pocket Exploiter Ghost v2"
 
-        # State initialization for path precomputation and navigation
+        # Navigation state precomputed on step 1
         self.target_pocket = None
         self.planned_moves = None
         self.current_move_idx = 0
@@ -253,14 +255,12 @@ class GhostAgent(BaseGhostAgent):
         """
         Executes one environment tick for the Ghost Agent.
         
-        Ignores enemy_position. Performs single BFS path precomputation on step 1,
-        follows the planned route to the hiding pocket, and then returns Move.STAY indefinitely.
+        Ignores enemy_position. Performs single-pass dual-path calculation on step 1,
+        follows the optimized path to the nearest pocket, and stays forever.
         """
-        # Step 1: Initialize target pocket and precompute path
+        # Step 1: Initialize target pocket choice and precompute path
         if self.planned_moves is None:
-            # 50/50 fair choice between left and right pockets
-            self.target_pocket = random.choice([self.LEFT_POCKET, self.RIGHT_POCKET])
-            self.planned_moves = self._compute_path_to_pocket(my_position, map_state)
+            self.planned_moves = self._plan_route_to_best_pocket(my_position, map_state)
 
         # Reached hiding pocket or finished path -> stay forever
         if self.current_move_idx >= len(self.planned_moves):
@@ -271,24 +271,64 @@ class GhostAgent(BaseGhostAgent):
         self.current_move_idx += 1
         return next_move
 
-    def _compute_path_to_pocket(self, start_pos: tuple, map_state: np.ndarray) -> list:
+    def _plan_route_to_best_pocket(self, start_pos: tuple, map_state: np.ndarray) -> list:
         """
-        Runs BFS to find the shortest path from start_pos to target_pocket.
+        Calculates shortest paths to both left and right pockets, chooses the nearer pocket,
+        and breaks distance ties randomly.
+        """
+        path_left = self._bfs_shortest_path(start_pos, self.LEFT_POCKET, map_state)
+        path_right = self._bfs_shortest_path(start_pos, self.RIGHT_POCKET, map_state)
+
+        dist_left = len(path_left)
+        dist_right = len(path_right)
+
+        # Select the strictly nearer pocket path
+        if dist_left < dist_right:
+            self.target_pocket = self.LEFT_POCKET
+            return path_left
+        elif dist_right < dist_left:
+            self.target_pocket = self.RIGHT_POCKET
+            return path_right
+        else:
+            # Equidistant from both pockets: pick randomly to remain unpredictable
+            if random.random() < 0.5:
+                self.target_pocket = self.LEFT_POCKET
+                return path_left
+            else:
+                self.target_pocket = self.RIGHT_POCKET
+                return path_right
+
+    def _bfs_shortest_path(self, start_pos: tuple, target_pos: tuple, map_state: np.ndarray) -> list:
+        """
+        Runs BFS to find the shortest path from start_pos to target_pos.
         
-        Neighbor processing order (UP, LEFT, RIGHT, DOWN) guarantees that among multiple 
-        shortest paths, the path performing its first UP move as early as possible is selected.
+        Dynamically adjusts neighbor expansion order based on spawn row:
+        - Spawned below Row 5: Prioritizes UP early to increase vertical distance from Pacman.
+        - Spawned at or above Row 5: Prioritizes horizontal moves (LEFT/RIGHT) and UP before DOWN
+          to delay downward moves into Pacman's threat zone.
         """
-        if start_pos == self.target_pocket:
+        if start_pos == target_pos:
             return []
 
-        # Direction deltas and corresponding Move enum values.
-        # Order matters: UP comes first to ensure earlier UP moves during BFS expansion.
-        directions = [
-            ((-1, 0), Move.UP),
-            ((0, -1), Move.LEFT),
-            ((0, 1), Move.RIGHT),
-            ((1, 0), Move.DOWN)
-        ]
+        spawn_row = start_pos[0]
+
+        # Determine directional search order based on spawn elevation relative to Row 5
+        if spawn_row > self.TARGET_ROW:
+            # Below target: Move UP early to climb away from lower half
+            directions = [
+                ((-1, 0), Move.UP),
+                ((0, -1), Move.LEFT),
+                ((0, 1), Move.RIGHT),
+                ((1, 0), Move.DOWN)
+            ]
+        else:
+            # At or above target: Move sideways first, delay DOWN as late as possible
+            directions = [
+                ((0, -1), Move.LEFT),
+                ((0, 1), Move.RIGHT),
+                ((-1, 0), Move.UP),
+                ((1, 0), Move.DOWN)
+            ]
 
         queue = deque([start_pos])
         visited = {start_pos}
@@ -298,7 +338,7 @@ class GhostAgent(BaseGhostAgent):
         while queue:
             curr_pos = queue.popleft()
 
-            if curr_pos == self.target_pocket:
+            if curr_pos == target_pos:
                 found = True
                 break
 
@@ -315,7 +355,7 @@ class GhostAgent(BaseGhostAgent):
 
         # Reconstruct sequence of moves from target back to start
         path_moves = []
-        curr = self.target_pocket
+        curr = target_pos
         while curr != start_pos:
             prev_pos, move = parent[curr]
             path_moves.append(move)
@@ -325,10 +365,9 @@ class GhostAgent(BaseGhostAgent):
         return path_moves
 
     def _is_valid_cell(self, pos: tuple, map_state: np.ndarray) -> bool:
-        """Checks if a position is within array boundaries and non-wall."""
+        """Checks if a position is within grid boundaries and non-wall."""
         r, c = pos
         rows, cols = map_state.shape
         if 0 <= r < rows and 0 <= c < cols:
-            # Cell is traversable if it is not a wall (1 represents wall)
             return map_state[r, c] != 1
         return False
