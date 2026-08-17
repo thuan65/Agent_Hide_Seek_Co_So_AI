@@ -226,274 +226,204 @@ class PacmanAgent(BasePacmanAgent):
 
 
 class GhostAgent(BaseGhostAgent):
-    """
-    Optimus Ghost - Optimized for Partial Observability Survival
-    Uses Target-Locked Top Migration (Spawn Bias), Ray Evasion, and Tortuosity Pathfinding.
-    """
+    """Ghost (Hider) implementation with organic hiding spot inference."""
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.name = "Optimus Ghost (Locked Top Migration)"
-        
-        # --- Spawn Bias Optimization Flag ---
-        # If True: Locks the closest target in the highest row and takes the absolute shortest path UP
-        self.use_spawn_bias = True  
-        
-        # State Tracking & Persistent Caches
-        self.initialized = False
-        self.last_known_pacman_pos = None
-        self.spawn_bias_target = None
-        self.top_row = 0
-        
-        self.height = 0
-        self.width = 0
-        self.traversable = set()
-        self.neighbor_cache = {}
-        self.dead_ends = set()
-        self.cycle_nodes = set()
+        self.graph = {}            
+        self.graph_computed = False
+        self.pacman_obs_radius = self._detect_pacman_obs_radius()
+        self.move_queue = deque()  # Stores Move enums to reach target
 
-    def _init_caches(self, map_state: np.ndarray, start_pos: tuple):
-        """Precomputes geometry, cycles, dead-ends, and locks top target on step 1."""
-        self.height, self.width = map_state.shape
-        
-        # 1. Identify traversable path cells
-        self.traversable = {
-            (r, c) for r in range(self.height) for c in range(self.width) 
-            if map_state[r, c] != 1 # Not a wall
-        }
-        
-        # 2. Build adjacency graph with Move.UP prioritized first
-        self.neighbor_cache = {}
-        for r, c in self.traversable:
-            neighbors = []
-            # Ordering UP first guarantees BFS prefers upward steps during tie-breaks
-            for move in [Move.UP, Move.LEFT, Move.RIGHT, Move.DOWN]:
-                dr, dc = move.value
-                nr, nc = r + dr, c + dc
-                if (nr, nc) in self.traversable:
-                    neighbors.append(((nr, nc), move))
-            self.neighbor_cache[(r, c)] = neighbors
-
-        # 3. Identify dead-ends (corridors with <= 1 escape route)
-        degrees = {cell: len(neighs) for cell, neighs in self.neighbor_cache.items()}
-        queue = [cell for cell, deg in degrees.items() if deg <= 1]
-        
-        while queue:
-            curr = queue.pop(0)
-            self.dead_ends.add(curr)
-            for neighbor, _ in self.neighbor_cache.get(curr, []):
-                if neighbor not in self.dead_ends:
-                    valid_neighs = [n for n, _ in self.neighbor_cache[neighbor] if n not in self.dead_ends]
-                    if len(valid_neighs) <= 1:
-                        queue.append(neighbor)
-                        
-        self.cycle_nodes = self.traversable - self.dead_ends
-        if not self.cycle_nodes:
-            self.cycle_nodes = set(self.traversable)
-
-        # 4. Lock persistent top target for Spawn Bias
-        if self.use_spawn_bias:
-            self.spawn_bias_target = self._select_locked_top_target(start_pos)
-
-        self.initialized = True
-
-    def _select_locked_top_target(self, start_pos: tuple) -> tuple:
-        """Finds the absolute highest reachable row and selects the cell with the shortest path distance."""
-        # 1. Determine the highest reachable row from start_pos
-        queue = deque([start_pos])
-        visited = {start_pos}
-        min_row = start_pos[0]
-        
-        while queue:
-            curr = queue.popleft()
-            if curr[0] < min_row:
-                min_row = curr[0]
-            for nxt_pos, _ in self.neighbor_cache.get(curr, []):
-                if nxt_pos not in visited:
-                    visited.add(nxt_pos)
-                    queue.append(nxt_pos)
-                    
-        self.top_row = min_row
-
-        # 2. First node reached at min_row during BFS is guaranteed to have the shortest path
-        queue = deque([(start_pos, 0)])
-        visited = {start_pos}
-        while queue:
-            curr, dist = queue.popleft()
-            if curr[0] == self.top_row:
-                return curr # Nearest path target locked!
-            for nxt_pos, _ in self.neighbor_cache.get(curr, []):
-                if nxt_pos not in visited:
-                    visited.add(nxt_pos)
-                    queue.append((nxt_pos, dist + 1))
-
-        return start_pos
-
-    def _is_los_blocked(self, pos1: tuple, pos2: tuple, map_state: np.ndarray) -> bool:
-        """Returns True if wall or corner blocks straight line of sight."""
-        r1, c1 = pos1
-        r2, c2 = pos2
-        
-        if r1 != r2 and c1 != c2:
-            return True
+    def step(self, map_state, my_position, enemy_position, step_number):
+        if not self.graph_computed:
+            self.graph = self._build_reachable_graph(map_state, my_position)
+            pacman_spawn = enemy_position if enemy_position is not None else (15, 10)
             
-        if r1 == r2:
-            for c in range(min(c1, c2) + 1, max(c1, c2)):
-                if map_state[r1, c] == 1:
-                    return True
-        else:
-            for r in range(min(r1, r2) + 1, max(r1, r2)):
-                if map_state[r, c1] == 1:
-                    return True
-                    
-        return False
+            # Filter 1 & 2: Pruning and Scoring
+            self._prune_candidates(pacman_spawn)
+            self._evaluate_safety_scores(map_state, pacman_spawn)
+            
+            # Filter 3: Target Selection & Path Calculation
+            target_node = self._select_best_target(my_position)
+            if target_node:
+                self.move_queue = self._bfs_path_moves(my_position, target_node)
+                
+            self.graph_computed = True
 
-    def _calculate_tortuosity(self, pos: tuple) -> float:
-        """Measures corridor windingness to strip Speed-2 Pacman down to Speed 1."""
-        turns = 0
-        neighbors = self.neighbor_cache.get(pos, [])
-        if len(neighbors) == 2:
-            m1 = neighbors[0][1]
-            m2 = neighbors[1][1]
-            if m1 != m2:
-                turns += 1
-        return turns * 15.0
+        # Pop pre-computed moves until reaching hiding spot
+        move = Move.STAY
+        if self.move_queue:
+            move = self.move_queue.popleft()
 
-    def _eval_evasion_move(self, move_pos: tuple, pacman_pos: tuple, map_state: np.ndarray) -> float:
-        """Evaluates tactical evasion safety when Pacman is visible."""
-        dist = abs(move_pos[0] - pacman_pos[0]) + abs(move_pos[1] - pacman_pos[1])
-        
-        if dist <= 1:
-            return -9999.0
-            
-        score = dist * 10.0
-        
-        if self._is_los_blocked(move_pos, pacman_pos, map_state):
-            score += 60.0
-            
-        if move_pos in self.dead_ends:
-            score -= 150.0
-            
-        score += self._calculate_tortuosity(move_pos)
-        
-        if move_pos in self.cycle_nodes:
-            score += 25.0
-            
-        return score
+        return move
 
-    def _detect_nearby_vision_ray(self, my_pos: tuple, map_state: np.ndarray):
-        """Detects if Pacman's vision ray is actively sweeping adjacent fog."""
-        r, c = my_pos
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            for i in range(1, 3):
-                nr, nc = r + dr*i, c + dc*i
-                if (nr, nc) in self.traversable:
-                    if map_state[nr, nc] == 0:
-                        return (nr, nc)
-                else:
-                    break
-        return None
+    def _select_best_target(self, my_position):
+        """
+        Filter 3: Selects candidate with highest safety score, breaking ties via 
+        shortest BFS path, and choosing randomly among candidates with equal path length.
+        """
+        candidates = [node for node in self.graph.values() if node["is_candidate"]]
+        if not candidates:
+            return None
 
-    def _bfs_next_step(self, start: tuple, target: tuple, allow_dead_ends: bool = False) -> Move:
-        """Deterministic BFS pathfinder. Set allow_dead_ends=True for absolute shortest paths."""
-        if start == target or target not in self.traversable:
-            return Move.STAY
-            
+        max_score = max(c["safety_score"] for c in candidates)
+        top_candidates = [c["pos"] for c in candidates if c["safety_score"] == max_score]
+
+        if len(top_candidates) == 1:
+            return top_candidates[0]
+
+        # Tie-breaker 1: Calculate shortest BFS path length for each top candidate
+        min_path_len = float('inf')
+        shortest_path_candidates = []
+
+        for pos in top_candidates:
+            path = self._bfs_path_moves(my_position, pos)
+            path_len = len(path)
+
+            if path_len < min_path_len:
+                min_path_len = path_len
+                shortest_path_candidates = [pos]
+            elif path_len == min_path_len:
+                shortest_path_candidates.append(pos)
+
+        # Tie-breaker 2: Random selection among candidates tied for shortest path length
+        return random.choice(shortest_path_candidates)
+
+    def _bfs_path_moves(self, start, target):
+        """Calculates BFS path from start to target and returns a deque of Move enums."""
+        if start == target:
+            return deque()
+
         queue = deque([(start, [])])
         visited = {start}
-        
+
         while queue:
             curr, path = queue.popleft()
             if curr == target:
-                return path[0] if path else Move.STAY
+                return deque(path)
+
+            for neighbor in self.graph[curr]["neighbors"]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    # Determine directional Move enum based on coordinate delta
+                    dr = neighbor[0] - curr[0]
+                    dc = neighbor[1] - curr[1]
+                    if dr == -1: move = Move.UP
+                    elif dr == 1: move = Move.DOWN
+                    elif dc == -1: move = Move.LEFT
+                    elif dc == 1: move = Move.RIGHT
+                    
+                    queue.append((neighbor, path + [move]))
+
+        return deque()
+
+    def _detect_pacman_obs_radius(self) -> int:
+        if '--pacman-obs-radius' in sys.argv:
+            try:
+                idx = sys.argv.index('--pacman-obs-radius')
+                return int(sys.argv[idx + 1])
+            except (ValueError, IndexError):
+                pass
+        try:
+            for frame_info in inspect.stack():
+                local_self = frame_info.frame.f_locals.get("self")
+                if local_self and local_self.__class__.__name__ == "Arena":
+                    return getattr(local_self, "pacman_obs_radius", 5)
+        except Exception:
+            pass
+        return 5
+
+    def _build_reachable_graph(self, map_state, start_pos):
+        rows, cols = map_state.shape
+        graph = {}
+        queue = deque([start_pos])
+        visited = {start_pos}
+        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+        while queue:
+            curr = queue.popleft()
+            graph[curr] = {
+                "pos": curr,
+                "neighbors": [],
+                "is_candidate": True,
+                "safety_score": 0.0
+            }
+            for dr, dc in directions:
+                nr, nc = curr[0] + dr, curr[1] + dc
+                if 0 <= nr < rows and 0 <= nc < cols and map_state[nr, nc] != 1:
+                    neighbor = (nr, nc)
+                    graph[curr]["neighbors"].append(neighbor)
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        queue.append(neighbor)
+        return graph
+
+    def _prune_candidates(self, enemy_position):
+        enemy_r, enemy_c = enemy_position
+        for pos, node in self.graph.items():
+            r, c = node["pos"]
+            manhattan_dist = abs(r - enemy_r) + abs(c - enemy_c)
+            degree = len(node["neighbors"])
+            if manhattan_dist <= 5 or degree >= 3:
+                node["is_candidate"] = False
+                node["safety_score"] = -999.0
+
+    def _evaluate_safety_scores(self, map_state, enemy_position):
+        rows, cols = map_state.shape
+        ghost_start_row = 9
+        max_north_distance = 9.0
+        max_runway_length = 12.0
+        cardinal_dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+        for pos, node in self.graph.items():
+            # Keep disqualified nodes heavily penalized on heatmap
+            if not node["is_candidate"]:
+                node["safety_score"] = -999.0
+                continue
+
+            r, c = node["pos"]
+
+            # 1. North Bias [-1.0, 1.0]
+            norm_north = (ghost_start_row - r) / max_north_distance
+            norm_north = max(-1.0, min(1.0, norm_north))
+
+            # 2. Infiltration & Direct Runway Risk
+            max_infiltrate_risk = 0
+
+            for dr, dc in cardinal_dirs:
+                # Measure direct sightline in direction (dr, dc)
+                direct_length = 0
+                for step in range(1, self.pacman_obs_radius + 1):
+                    ur, uc = r + dr * step, c + dc * step
+                    if 0 <= ur < rows and 0 <= uc < cols and map_state[ur, uc] != 1:
+                        direct_length += 1
+                    else:
+                        break
                 
-            for nxt_pos, move in self.neighbor_cache.get(curr, []):
-                if not allow_dead_ends and nxt_pos in self.dead_ends and nxt_pos != target:
-                    continue
-                if nxt_pos not in visited:
-                    visited.add(nxt_pos)
-                    queue.append((nxt_pos, path + [move]))
-                    
-        # Fallback if dead-end filter blocked path
-        if not allow_dead_ends:
-            return self._bfs_next_step(start, target, allow_dead_ends=True)
-                    
-        return Move.STAY
+                # Direct exposure counts toward risk
+                max_infiltrate_risk = max(max_infiltrate_risk, direct_length)
 
-    def step(self, map_state: np.ndarray, 
-             my_position: tuple, 
-             enemy_position: tuple,
-             step_number: int) -> Move:
-        
-        if not self.initialized:
-            self._init_caches(map_state, my_position)
-            
-        # ------------------------------------------------------------------
-        # STATE 1: PACMAN VISIBLE (Corner Breaking & Tortuosity Evasion)
-        # ------------------------------------------------------------------
-        if enemy_position is not None:
-            self.last_known_pacman_pos = enemy_position
-            
-            best_score = -float('inf')
-            best_move = Move.STAY
-            
-            candidates = self.neighbor_cache.get(my_position, []) + [(my_position, Move.STAY)]
-            for nxt_pos, move in candidates:
-                score = self._eval_evasion_move(nxt_pos, enemy_position, map_state)
-                if score > best_score:
-                    best_score = score
-                    best_move = move
+                # Check perpendicular bleed from intermediate tiles u
+                for step in range(1, direct_length + 1):
+                    ur, uc = r + dr * step, c + dc * step
                     
-            return best_move
+                    # If moving vertically (dr != 0), perpendicular is horizontal (dc == 0)
+                    perp_dirs = [(0, -1), (0, 1)] if dr != 0 else [(-1, 0), (1, 0)]
 
-        # ------------------------------------------------------------------
-        # SPAWN BIAS OVERRIDE: FORCE NEAREST PATH UP UNTIL TOPMOST ROW
-        # ------------------------------------------------------------------
-        if self.use_spawn_bias:
-            # Check if we have arrived at the topmost traversable row
-            if my_position[0] <= self.top_row:
-                self.use_spawn_bias = False # Upward migration complete!
-            else:
-                # Take the absolute shortest path to the top target
-                move = self._bfs_next_step(my_position, self.spawn_bias_target, allow_dead_ends=True)
-                if move != Move.STAY:
-                    return move
+                    cross_ray_length = 0
+                    for p_dr, p_dc in perp_dirs:
+                        for p_step in range(1, int(max_runway_length) + 1):
+                            pr, pc = ur + p_dr * p_step, uc + p_dc * p_step
+                            if 0 <= pr < rows and 0 <= pc < cols and map_state[pr, pc] != 1:
+                                cross_ray_length += 1
+                            else:
+                                break
 
-        # ------------------------------------------------------------------
-        # STATE 2: PREDICTIVE RAY EVASION (Vision Ray Detected Nearby)
-        # ------------------------------------------------------------------
-        ray_pos = self._detect_nearby_vision_ray(my_position, map_state)
-        if ray_pos is not None:
-            best_score = -float('inf')
-            best_move = Move.STAY
-            
-            candidates = self.neighbor_cache.get(my_position, []) + [(my_position, Move.STAY)]
-            for nxt_pos, move in candidates:
-                dist = abs(nxt_pos[0] - ray_pos[0]) + abs(nxt_pos[1] - ray_pos[1])
-                score = dist * 10.0
-                
-                if self._is_los_blocked(nxt_pos, ray_pos, map_state):
-                    score += 40.0
-                if nxt_pos in self.dead_ends:
-                    score -= 100.0
-                    
-                if score > best_score:
-                    best_score = score
-                    best_move = move
-                    
-            return best_move
+                    max_infiltrate_risk = max(max_infiltrate_risk, cross_ray_length)
 
-        # ------------------------------------------------------------------
-        # STATE 3: STEALTH & NAVIGATION (Pacman Unseen)
-        # ------------------------------------------------------------------
-        if my_position in self.cycle_nodes and map_state[my_position] == -1:
-            return Move.STAY
-            
-        safe_nodes = list(self.cycle_nodes)
-        if safe_nodes:
-            target = min(safe_nodes, key=lambda n: abs(n[0] - my_position[0]) + abs(n[1] - my_position[1]))
-            move = self._bfs_next_step(my_position, target)
-            if move != Move.STAY:
-                return move
+            # Normalize Infiltration Risk [0.0, 1.0]
+            norm_risk = min(1.0, max_infiltrate_risk / max_runway_length)
 
-        return Move.STAY
+            # Safety Score: Risk heavily penalizes open runways
+            node["safety_score"] = (1 * norm_north) - (1 * norm_risk)
